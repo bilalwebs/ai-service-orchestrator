@@ -1,31 +1,3 @@
-# from db.mock_db import db
-# from schemas.models import ServiceType, Provider, Booking
-# from typing import List
-
-# class DBTool:
-#     def get_providers_by_service(self, service_type: ServiceType) -> List[Provider]:
-#         return db.get_providers_by_type(service_type)
-
-#     def save_booking(self, booking: Booking):
-#         return db.add_booking(booking)
-
-#     def get_provider_by_id(self, provider_id: str) -> Provider:
-#         return db.providers.get(provider_id)
-
-# db_tool = DBTool()
-
-
-
-
-
-
-
-
-
-
-
-
-
 from schemas.models import Booking, ServiceType, Provider
 from typing import List
 

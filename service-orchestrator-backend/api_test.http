@@ -1,0 +1,31 @@
+### Test Case 1 — AC Technician
+POST http://localhost:8000/requests/
+Content-Type: application/json
+
+{
+  "user_id": "user_001",
+  "raw_query": "Mera AC thanda nahi kar raha, gas check karwani hai. Jaldi bhejien.",
+  "location": {
+    "address": "North Nazimabad, Karachi",
+    "lat": 24.9333,
+    "lng": 67.0333
+  },
+  "urgency": "high"
+}
+
+###
+
+### Test Case 2 — Plumber Emergency
+POST http://localhost:8000/requests/
+Content-Type: application/json
+
+{
+  "user_id": "user_002",
+  "raw_query": "Kitchen sink leak ho raha hai bohot paani aa raha hai!",
+  "location": {
+    "address": "G-13, Islamabad",
+    "lat": 33.6333,
+    "lng": 72.9667
+  },
+  "urgency": "high"
+}
