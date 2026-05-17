@@ -1,54 +1,10 @@
-# from fastapi import APIRouter, HTTPException
-# from schemas.models import ServiceRequest
-# from agents.graph import app_graph
-
-# router = APIRouter(prefix="/requests", tags=["Service Requests"])
-
-# @router.post("/")
-# async def create_service_request(request: ServiceRequest):
-#     """
-#     Antigravity Service Orchestrator - Main Endpoint
-#     Full Agentic Workflow: Intent Parsing → Provider Discovery → Ranking → Booking → Follow-up
-#     """
-#     initial_state = {
-#         "request": request,
-#         "intent": None,
-#         "language": request.language_detected or "en",
-#         "urgency": request.urgency.value,           # Enum ko string mein convert
-#         "providers": [],
-#         "selected_provider": None,
-#         "booking": None,
-#         "trace": [],
-#         "reasoning": "",
-#         "final_response": None
-#     }
-
-#     try:
-#         # Run the full LangGraph workflow
-#         result = app_graph.invoke(initial_state)
-        
-#         return {
-#             "success": True,
-#             "message": "Service request processed successfully",
-#             "detected_intent": result.get("intent"),
-#             "detected_language": result.get("language"),
-#             "final_output": result.get("final_response"),
-#             "trace": result.get("trace", []),
-#             "booking_id": result.get("booking").id if result.get("booking") else None
-#         }
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=500, 
-#             detail=f"Workflow execution failed: {str(e)}"
-#         )
-
-
-
-
 import re
-from fastapi import APIRouter, HTTPException
-from schemas.models import ServiceRequest
-from agents.graph import app_graph
+from fastapi import APIRouter, HTTPException, Path
+from schemas.models import ServiceRequest, BookingStatus
+from agents.graph import app_graph, complete_booking_node
+from tools.db_tool import db_tool
+from utils.request_id import generate_request_id
+from logs.logger import log_interaction
 
 router = APIRouter(prefix="/requests", tags=["Service Requests"])
 
@@ -78,38 +34,24 @@ STAGE_MAP = {
     "no provider": "followup",
 }
 
-
 def parse_trace_string(raw_trace: list[str]) -> list[dict]:
     """Convert raw emoji string trace into structured objects."""
     structured = []
     for msg in raw_trace:
-        # Strip emojis and leading symbols
-        clean = re.sub(
-            r'[\U0001F000-\U0001FFFF\u2600-\u27FF\uFE00-\uFE0F\u2700-\u27BF]+',
-            '', msg
-        ).strip()
-
-        # Extract [Stage Label] from brackets
+        clean = re.sub(r'[\U0001F000-\U0001FFFF☀-⟿︀-️✀-➿]+', '', msg).strip()
         bracket = re.search(r'\[([^\]]+)\]', clean)
         raw_stage = bracket.group(1).lower() if bracket else ""
-
-        # Remove the bracket from message body
         body = re.sub(r'\[.*?\]\s*', '', clean).strip(' :-|')
-
-        # Map to structured stage
         stage = "trace"
         for keyword, mapped in STAGE_MAP.items():
             if keyword in raw_stage or keyword in body.lower():
                 stage = mapped
                 break
-
-        # Determine status
         status = "completed"
         if any(w in body.lower() for w in ["failed", "aborted", "error", "no provider", "no match"]):
             status = "failed"
         elif any(w in body.lower() for w in ["pending", "searching", "waiting"]):
             status = "pending"
-
         if body:
             structured.append({
                 "stage": stage,
@@ -118,43 +60,95 @@ def parse_trace_string(raw_trace: list[str]) -> list[dict]:
             })
     return structured
 
-
 @router.post("/")
 async def create_service_request(request: ServiceRequest):
-    """
-    Antigravity Service Orchestrator — Main Endpoint
-    Returns STRICT STRUCTURED JSON only. Frontend-parseable.
-    """
+    """Main endpoint – runs the full LangGraph workflow."""
+    # Generate unique request ID for observability
+    request_id = generate_request_id()
+
+    # START trace for user input received
+    from agents.graph import _make_trace
+    start_user_input = _make_trace(
+        step_name="user_input_received",
+        agent_name="router",
+        description="Received service request",
+        input_data={"raw_query": request.raw_query, "user_id": request.user_id, "location": request.location.dict() if request.location else None},
+        output_data=None,
+        reasoning="",
+        tool_used="API",
+        status="started",
+        request_id=request_id,
+    )
+
+    # Log request receipt
+    log_interaction(
+        request_id=request_id,
+        stage="request_received",
+        message=f"Received service request: {request.raw_query}",
+        status="success",
+        user_id=request.user_id,
+        raw_query=request.raw_query,
+        urgency=request.urgency.value,
+        location=request.location.dict() if request.location else None
+    )
+
+    # END trace for user input received
+    end_user_input = _make_trace(
+        step_name="user_input_received",
+        agent_name="router",
+        description="Service request logged",
+        input_data={"raw_query": request.raw_query},
+        output_data={"status": "logged"},
+        reasoning="",
+        tool_used="API",
+        status="completed",
+        request_id=request_id,
+    )
+
     initial_state = {
         "request": request,
         "intent": None,
         "language": request.language_detected or "en",
         "urgency": request.urgency.value,
         "providers": [],
+        "top_providers": [],
         "selected_provider": None,
         "booking": None,
-        "trace": [],
+        "trace": [start_user_input, end_user_input],
         "reasoning": "",
-        "final_response": None
+        "final_response": None,
+        "request_id": request_id  # Add request_id to state for agent tracing
     }
 
     try:
         result = app_graph.invoke(initial_state)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Workflow execution failed: {str(e)}"
+
+        # Log successful processing
+        log_interaction(
+            request_id=request_id,
+            stage="workflow_completed",
+            message="LangGraph workflow completed successfully",
+            status="success",
+            booking_id=result.get("booking").id if result.get("booking") else None,
+            intent=result.get("intent").value if result.get("intent") else None
         )
+    except Exception as e:
+        # Log error
+        log_interaction(
+            request_id=request_id,
+            stage="workflow_failed",
+            message=f"Workflow execution failed: {str(e)}",
+            status="error",
+            error=str(e)
+        )
+        raise HTTPException(status_code=500, detail=f"Workflow execution failed: {str(e)}")
 
     fo = result.get("final_response") or {}
     raw_trace = result.get("trace", [])
     booking = result.get("booking")
     status = fo.get("status", "error")
 
-    # ── Build structured trace ────────────────────────────────────────────
-    structured_trace = parse_trace_string(raw_trace)
-
-    # ── Normalize next_steps (already structured from followup_node) ──────
+    structured_trace = raw_trace  # Traces are now structured dicts
     raw_steps = fo.get("next_steps", [])
     structured_steps = []
     for s in raw_steps:
@@ -167,7 +161,6 @@ async def create_service_request(request: ServiceRequest):
             "action_label": s.get("action_label")
         })
 
-    # ── Final strict response ─────────────────────────────────────────────
     return {
         "success": status == "success",
         "data": {
@@ -176,6 +169,7 @@ async def create_service_request(request: ServiceRequest):
             "service_request": fo.get("service_request", {}),
             "provider": fo.get("provider"),
             "appointment": fo.get("appointment"),
+            "top_providers": fo.get("top_providers"),
             "next_steps": structured_steps,
             "followup": fo.get("followup", {}),
             "error": fo.get("error"),
@@ -189,9 +183,56 @@ async def create_service_request(request: ServiceRequest):
         }
     }
 
+@router.post("/bookings/{booking_id}/complete")
+async def complete_booking(booking_id: str):
+    """Mark a booking as completed and update follow-up."""
+    # Generate request ID for this operation
+    request_id = generate_request_id()
+
+    # Log booking completion request
+    log_interaction(
+        request_id=request_id,
+        stage="booking_completion_requested",
+        message=f"Booking {booking_id} completion requested",
+        status="success"
+    )
+
+    # Build minimal state to invoke complete_booking_node
+    initial_state = {
+        "booking": db_tool.get_booking_by_id(booking_id),
+        "trace": [],
+        "request_id": request_id
+    }
+
+    try:
+        result = complete_booking_node(initial_state)
+
+        # Log successful booking completion
+        log_interaction(
+            request_id=request_id,
+            stage="booking_completed",
+            message=f"Booking {booking_id} marked as completed",
+            status="success",
+            result=result
+        )
+    except Exception as e:
+        # Log error
+        log_interaction(
+            request_id=request_id,
+            stage="booking_completion_failed",
+            message=f"Booking completion failed: {str(e)}",
+            status="error",
+            error=str(e)
+        )
+        raise HTTPException(status_code=500, detail=f"Booking completion failed: {str(e)}")
+
+    return {
+        "success": True,
+        "message": f"Booking {booking_id} marked as completed.",
+        "trace": result.get("trace", [])
+    }
 
 def _map_action_type(action_type: str) -> str:
-    """Normalize action_type to frontend-safe enum."""
     mapping = {
         "phone_call": "action",
         "reminder":   "info",
@@ -201,7 +242,6 @@ def _map_action_type(action_type: str) -> str:
         "warning":    "warning",
     }
     return mapping.get(action_type, "info")
-
 
 def _build_message(fo: dict, status: str) -> str:
     if status == "success":

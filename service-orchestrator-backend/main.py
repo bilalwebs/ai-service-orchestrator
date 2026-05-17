@@ -16,9 +16,14 @@ app = FastAPI(
 )
 
 # CORS Middleware
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+
+# CORS Middleware
+# Development: allow all origins (*). For production or demo, set the ALLOWED_ORIGINS environment variable
+# to a comma‑separated list of allowed origins, e.g. "https://myapp.vercel.app,http://localhost:3000"
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

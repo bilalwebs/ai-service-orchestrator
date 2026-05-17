@@ -18,6 +18,10 @@ class DBTool:
         """Optional: Get single provider by ID"""
         return db.providers.get(provider_id)
 
+    def get_booking_by_id(self, booking_id: str) -> Booking | None:
+        """Get booking by ID - Used for completion endpoint"""
+        return db.get_booking_by_id(booking_id)
+
     def get_all_bookings(self):
         """Optional: For debugging"""
         return db.get_all_bookings()

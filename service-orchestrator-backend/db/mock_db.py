@@ -100,6 +100,13 @@ class MockDB:
         self.bookings.append(booking)
         return booking
 
+    def get_booking_by_id(self, booking_id: str) -> Booking | None:
+        """Return a booking by its ID or None if not found."""
+        for b in self.bookings:
+            if b.id == booking_id:
+                return b
+        return None
+
     def get_all_bookings(self):
         return self.bookings
 
