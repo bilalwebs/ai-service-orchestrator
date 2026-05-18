@@ -7,6 +7,7 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers import requests
+from routers.auth_router import router as auth_router
 import uvicorn
 
 app = FastAPI(
@@ -14,6 +15,8 @@ app = FastAPI(
     description="A multi-agent system for informal service booking in Pakistan.",
     version="1.0.0"
 )
+
+app.include_router(auth_router)
 
 # CORS Middleware
 app.add_middleware(
