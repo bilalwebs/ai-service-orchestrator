@@ -1,8 +1,9 @@
 from typing import List, Dict
-from schemas.models import Provider, ServiceType, Location, Booking
+from schemas.models import Provider, ServiceType, Location, Booking, AdminRequestLog
 
 class MockDB:
     def __init__(self):
+        self.request_logs: List[AdminRequestLog] = []
         self.providers: Dict[str, Provider] = {
             "p1": Provider(
                 id="p1", name="Kamran Khan", service_type=ServiceType.AC_TECHNICIAN, 
@@ -109,6 +110,60 @@ class MockDB:
 
     def get_all_bookings(self):
         return self.bookings
+
+    def log_request(self, entry: AdminRequestLog):
+        self.request_logs.append(entry)
+
+    def get_all_request_logs(self) -> List[AdminRequestLog]:
+        return self.request_logs
+
+    def get_request_log_by_id(self, request_id: str) -> AdminRequestLog | None:
+        for log in self.request_logs:
+            if log.id == request_id:
+                return log
+        return None
+
+    def get_provider_by_id(self, provider_id: str) -> Provider | None:
+        return self.providers.get(provider_id)
+
+    def create_provider(self, provider: Provider) -> Provider:
+        self.providers[provider.id] = provider
+        return provider
+
+    def update_provider(self, provider_id: str, provider: Provider) -> Provider | None:
+        if provider_id not in self.providers:
+            return None
+        self.providers[provider_id] = provider
+        return provider
+
+    def delete_provider(self, provider_id: str) -> bool:
+        if provider_id not in self.providers:
+            return False
+        del self.providers[provider_id]
+        return True
+
+    def toggle_provider_availability(self, provider_id: str) -> Provider | None:
+        p = self.providers.get(provider_id)
+        if p is None:
+            return None
+        p.availability = not p.availability
+        return p
+
+    def cancel_booking(self, booking_id: str):
+        from schemas.models import BookingStatus
+        for b in self.bookings:
+            if b.id == booking_id:
+                b.status = BookingStatus.CANCELLED
+                return b
+        return None
+
+    def complete_booking_admin(self, booking_id: str):
+        from schemas.models import BookingStatus
+        for b in self.bookings:
+            if b.id == booking_id:
+                b.status = BookingStatus.COMPLETED
+                return b
+        return None
 
 
 # Global instance

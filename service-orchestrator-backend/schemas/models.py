@@ -81,6 +81,32 @@ class Booking(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.now)
 
 
+class ProviderCreate(BaseModel):
+    """Request body for creating or updating a provider"""
+    name: str
+    service_type: ServiceType
+    rating: float = Field(..., ge=0, le=5)
+    location: Location
+    phone: str
+    price_per_hour: float = Field(..., gt=0)
+    experience_years: int = Field(..., ge=0)
+    availability: bool = True
+
+
+class AdminRequestLog(BaseModel):
+    """Log entry for a processed user request"""
+    id: str
+    user_id: str
+    raw_query: str
+    urgency: str
+    intent: Optional[str] = None
+    language: str = "en"
+    status: str
+    booking_id: Optional[str] = None
+    trace: List[Dict[str, Any]] = Field(default_factory=list)
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+
 # Optional: Config for better JSON handling
 class Config:
     use_enum_values = True

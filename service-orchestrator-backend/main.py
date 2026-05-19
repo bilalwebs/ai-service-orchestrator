@@ -6,7 +6,7 @@ load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import requests
+from routers import requests, admin
 import uvicorn
 
 app = FastAPI(
@@ -31,6 +31,7 @@ app.add_middleware(
 
 # Include Routers
 app.include_router(requests.router)
+app.include_router(admin.router)
 
 @app.get("/")
 async def health_check():
