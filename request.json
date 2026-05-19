@@ -1,0 +1,11 @@
+{
+  "raw_query": "AC thanda karna hai jaldi",
+  "user_id": "test_user",
+  "location": {
+    "address": "Gulshan Karachi",
+    "lat": 24.92,
+    "lng": 67.03
+  },
+  "urgency": "high",
+  "language_detected": "roman_urdu"
+}
