@@ -1,0 +1,1811 @@
+agents/graph.py
+# -------------------------------------------------------------------
+import os
+import datetime
+import json
+import re
+import logging
+from typing import TypedDict, List, Optional, Any
+from langgraph.graph import StateGraph, END
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from schemas.models import ServiceRequest, Provider, Booking, ServiceType, BookingStatus
+from tools.db_tool import db_tool
+from tools.maps_tool import maps_tool
+from config import (
+    MAX_DISTANCE_KM,
+    TOP_N_PROVIDERS,
+    WEIGHT_RATING,
+    WEIGHT_DISTANCE,
+    WEIGHT_EXPERIENCE,
+    URGENCY_DISTANCE_MULTIPLIER,
+)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.0-flash",
+    google_api_key=os.getenv("GOOGLE_API_KEY"),
+    temperature=0.1,
+)
+
+
+def _make_trace(step_name: str, agent_name: str, description: str, input_data: Any,
+                output_data: Any, reasoning: str, tool_used: str, status: str,
+                request_id: str) -> dict:
+    return {
+        "step_name": step_name,
+        "agent_name": agent_name,
+        "description": description,
+        "input": input_data,
+        "output": output_data,
+        "reasoning": reasoning,
+        "tool_used": tool_used,
+        "status": status,
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "request_id": request_id,
+    }
+
+
+class AgentState(TypedDict):
+    request: ServiceRequest
+    intent: Optional[ServiceType]
+    language: str
+    urgency: str
+    providers: List[dict]
+    top_providers: List[dict]
+    selected_provider: Optional[dict]
+    booking: Optional[Booking]
+    trace: List[dict]
+    reasoning: str
+    final_response: Optional[dict]
+    request_id: str
+
+
+def rule_based_fallback(query: str):
+    query_lower = query.lower()
+    keywords = {
+        ServiceType.TUTOR: ["tutor", "teacher", "parhana", "parhai", "padhana", "maths",
+                            "science", "physics", "home tuition", "class", "bacha", "baca",
+                            "primary", "homework", "lesson", "sir", "miss", "tuition",
+                            "study", "johar town"],
+        ServiceType.BEAUTICIAN: ["beautician", "parlour", "makeup", "facial", "party makeup",
+                                 "mehndi", "hair", "styling"],
+        ServiceType.ELECTRICIAN: ["bijli", "electrician", "short circuit", "sparks",
+                                  "current", "wire", "board"],
+        ServiceType.PLUMBER: ["plumber", "nal", "leak", "sink", "tap", "pipe", "pipeline"],
+        ServiceType.AC_TECHNICIAN: ["ac", "thanda", "cooling", "gas", "split", "cooler",
+                                    "ac repair", "ac technician", "ac band"],
+        ServiceType.CLEANER: ["safai", "cleaner", "cleaning", "jharu", "pocha"],
+        ServiceType.PAINTER: ["painter", "paint", "rang", "white wash"],
+    }
+    detected_intent = ServiceType.OTHER
+    for service, words in keywords.items():
+        if any(word in query_lower for word in words):
+            detected_intent = service
+            break
+
+    urgency = "medium"
+    if any(word in query_lower for word in ["jaldi", "fauran", "foran", "emergency", "urgent",
+                                             "abhi", "abhi chahiye", "sparks", "leak ho raha",
+                                             "short circuit", "aag", "fire", "flood", "turant",
+                                             "immediately", "right now", "asap"]):
+        urgency = "high"
+    elif any(word in query_lower for word in ["kal", "tomorrow", "next week", "baad mein",
+                                               "agli baar", "is hafte", "this week",
+                                               "next month", "plan"]):
+        urgency = "low"
+
+    urdu_markers = ["hai", "mein", "kar", "ho", "ki", "ka", "chahiye", "bhejien",
+                    "parhanay", "subah", "kal", "mujhe", "aur", "se"]
+    language = "roman_urdu" if any(w in query_lower for w in urdu_markers) else "en"
+    return {"intent": detected_intent, "language": language, "urgency": urgency}
+
+
+def intent_parser_node(state: AgentState):
+    """[NODE 1] Intent Parser — Gemini 2.0 Flash + rule-based fallback."""
+    request_id = state.get("request_id", "")
+    query = state["request"].raw_query
+
+    # ✅ Single start_trace only
+    start_trace = _make_trace(
+        step_name="intent_understanding",
+        agent_name="intent_parser",
+        description="Parse user query to extract service type, language, urgency",
+        input_data={"raw_query": query},
+        output_data=None,
+        reasoning="",
+        tool_used="",
+        status="started",
+        request_id=request_id,
+    )
+
+    system_prompt = """You are an intent parser for Antigravity Service Orchestrator.
+Extract Service Type, Language, and Urgency.
+Return ONLY valid JSON like: {"intent": "ac_technician", "language": "roman_urdu", "urgency": "high"}
+intent values: ac_technician | plumber | electrician | tutor | cleaner | painter | beautician | other
+language values: roman_urdu | urdu | en
+urgency values: low | medium | high | emergency
+"""
+    try:
+        response = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"Query: {query}")
+        ])
+        content = response.content.strip()
+        content = re.sub(r'^```(?:json)?\s*', '', content)
+        content = re.sub(r'\s*```$', '', content).strip()
+        match = re.search(r'\{[^{}]+\}', content, re.DOTALL)
+        if not match:
+            raise ValueError("No JSON object found in LLM response")
+        data = json.loads(match.group())
+        source      = "Gemini LLM"
+        intent_val  = data.get("intent",   "other")
+        lang_val    = data.get("language", "en")
+        urgency_val = data.get("urgency",  "medium")
+
+    except Exception:
+        source      = "Rule-based Fallback"
+        data        = rule_based_fallback(query)
+        intent_val  = data["intent"]
+        lang_val    = data["language"]
+        urgency_val = data["urgency"]
+
+    try:
+        intent_obj = ServiceType(intent_val)
+    except ValueError:
+        intent_obj = ServiceType.OTHER
+
+    logger.info(f"Intent: {intent_obj.value}, lang: {lang_val}, urgency: {urgency_val}, source: {source}")
+
+    # ✅ end_trace is a _make_trace dict — NO plain strings
+    end_trace = _make_trace(
+        step_name="intent_understanding",
+        agent_name="intent_parser",
+        description="Intent parsed successfully",
+        input_data={"raw_query": query},
+        output_data={"intent": intent_val, "language": lang_val, "urgency": urgency_val},
+        reasoning=f"Source: {source}. service={intent_val}, language={lang_val}, urgency={urgency_val}",
+        tool_used="Gemini LLM" if source == "Gemini LLM" else "Rule-based",
+        status="completed",
+        request_id=request_id,
+    )
+
+    return {
+        "intent": intent_obj,
+        "language": lang_val,
+        "urgency": urgency_val,
+        "trace": state.get("trace", []) + [start_trace, end_trace],
+    }
+
+
+def provider_discovery_node(state: AgentState):
+    """[NODE 2] Provider Discovery — DB query + distance filter."""
+    request_id = state.get("request_id", "")
+    intent     = state["intent"]
+    user_loc   = state["request"].location
+
+    start_trace = _make_trace(
+        step_name="provider_search",
+        agent_name="provider_discovery",
+        description="Find providers within max distance",
+        input_data={
+            "intent": intent.value if intent else None,
+            "location": user_loc.model_dump() if user_loc else None,  # ✅ model_dump()
+            "max_distance_km": MAX_DISTANCE_KM,
+        },
+        output_data=None,
+        reasoning="",
+        tool_used="",
+        status="started",
+        request_id=request_id,
+    )
+
+    all_providers          = db_tool.get_providers_by_type(intent)
+    providers_with_distance = []
+    skipped_unavailable    = []
+    skipped_distant        = []
+
+    for p in all_providers:
+        if not p.availability:
+            skipped_unavailable.append(p.name)
+            continue
+        dist = maps_tool.get_distance(user_loc.lat, user_loc.lng, p.location.lat, p.location.lng)
+        if dist > MAX_DISTANCE_KM:
+            skipped_distant.append((p.name, round(dist, 2)))
+            continue
+        p_dict = p.model_dump()  # ✅ model_dump() not .dict()
+        p_dict["distance"] = round(dist, 2)
+        providers_with_distance.append(p_dict)
+
+    discovery_msg = (
+        f"Found {len(providers_with_distance)} providers within {MAX_DISTANCE_KM}km."
+        if providers_with_distance
+        else f"No providers within {MAX_DISTANCE_KM}km for {intent.value}."
+    )
+    logger.info(f"Discovery: {len(providers_with_distance)} providers found")
+
+    end_trace = _make_trace(
+        step_name="provider_search",
+        agent_name="provider_discovery",
+        description="Provider search completed",
+        input_data=None,
+        output_data={
+            "providers_count": len(providers_with_distance),
+            "skipped_unavailable": skipped_unavailable,
+            "skipped_distant": [{"name": n, "distance_km": d} for n, d in skipped_distant],
+        },
+        reasoning=discovery_msg,
+        tool_used="DB+Maps",
+        status="completed",
+        request_id=request_id,
+    )
+
+    return {
+        "providers": providers_with_distance,
+        "trace": state.get("trace", []) + [start_trace, end_trace],
+    }
+
+
+def ranking_node(state: AgentState):
+    """[NODE 3] Ranking — weighted score: rating, distance, experience."""
+    request_id = state.get("request_id", "")
+    providers  = state["providers"]
+    urgency    = state["urgency"]
+
+    start_trace = _make_trace(
+        step_name="provider_ranking",
+        agent_name="ranking",
+        description="Rank providers by weighted criteria",
+        input_data={"providers_count": len(providers), "urgency": urgency},
+        output_data=None,
+        reasoning="",
+        tool_used="",
+        status="started",
+        request_id=request_id,
+    )
+    logger.info(f"Ranking: {len(providers)} providers, urgency={urgency}")
+
+    if not providers:
+        end_trace = _make_trace(
+            step_name="provider_ranking",
+            agent_name="ranking",
+            description="No providers to rank",
+            input_data=None,
+            output_data={"selected_provider": None},
+            reasoning="No providers found within distance limit",
+            tool_used="",
+            status="completed",
+            request_id=request_id,
+        )
+        return {
+            "selected_provider": None,
+            "top_providers": [],
+            "trace": state.get("trace", []) + [start_trace, end_trace],
+        }
+
+    dist_weight   = URGENCY_DISTANCE_MULTIPLIER.get(urgency, 1.0)
+    rating_weight = WEIGHT_RATING
+    exp_weight    = WEIGHT_EXPERIENCE
+
+    for p in providers:
+        p["score"] = round(
+            (p["rating"] * rating_weight)
+            - (p["distance"] * dist_weight)
+            + (p.get("experience_years", 0) * exp_weight),
+            2,
+        )
+
+    ranked   = sorted(providers, key=lambda x: x["score"], reverse=True)
+    top_n    = ranked[:TOP_N_PROVIDERS]
+    selected = ranked[0]
+
+    score_log = " | ".join(
+        f"{p['name']}: rating={p['rating']} dist={p['distance']}km "
+        f"exp={p.get('experience_years',0)}y score={p['score']}"
+        for p in ranked
+    )
+
+    reasoning = (
+        f"{selected['name']} is the top match with a rating of {selected['rating']} "
+        f"and is located just {selected['distance']}km away."
+    )
+    reasoning += (
+        " Priority given to fast response time due to high urgency."
+        if urgency in ["high", "emergency"]
+        else " Selection optimized for service quality, reliability, and proximity."
+    )
+
+    top_providers_details = [
+        {
+            "rank": i,
+            "provider": {
+                "id": p["id"], "name": p["name"], "rating": p["rating"],
+                "distance_km": p["distance"],
+                "experience_years": p.get("experience_years", 0),
+                "price_per_hour": p.get("price_per_hour", 1500),
+                "available": True,
+            },
+            "score": p["score"],
+            "reasoning": (
+                f"Score {p['score']}: Rating {p['rating']}, "
+                f"Distance {p['distance']}km, "
+                f"Experience {p.get('experience_years',0)} years"
+            ),
+        }
+        for i, p in enumerate(top_n, 1)
+    ]
+
+    end_trace = _make_trace(
+        step_name="provider_ranking",
+        agent_name="ranking",
+        description="Ranking completed",
+        input_data=None,
+        output_data={
+            "selected_provider": selected["name"],
+            "score": selected["score"],
+            "score_breakdown": score_log,
+            "weights": {"rating": rating_weight, "distance": dist_weight, "experience": exp_weight},
+        },
+        reasoning=reasoning,
+        tool_used="",
+        status="completed",
+        request_id=request_id,
+    )
+
+    return {
+        "selected_provider": selected,
+        "top_providers": top_providers_details,
+        "reasoning": reasoning,
+        "trace": state.get("trace", []) + [start_trace, end_trace],
+    }
+
+
+def booking_execution_node(state: AgentState):
+    """[NODE 4] Booking Execution — creates confirmed booking in MockDB."""
+    request_id = state.get("request_id", "")
+    selected   = state["selected_provider"]
+
+    start_trace = _make_trace(
+        step_name="booking_simulation",
+        agent_name="booking_execution",
+        description="Simulate booking creation",
+        input_data={
+            "provider_id": selected.get("id") if selected else None,
+            "urgency": state.get("urgency"),
+        },
+        output_data=None,
+        reasoning="",
+        tool_used="",
+        status="started",
+        request_id=request_id,
+    )
+
+    if not selected:
+        end_trace = _make_trace(
+            step_name="booking_simulation",
+            agent_name="booking_execution",
+            description="Booking aborted — no provider",
+            input_data=None, output_data=None,
+            reasoning="No viable provider found",
+            tool_used="", status="failed",
+            request_id=request_id,
+        )
+        return {"trace": state.get("trace", []) + [start_trace, end_trace]}
+
+    booking_id = f"BK-{int(datetime.datetime.now().timestamp())}"
+    preferred  = state["request"].preferred_time
+
+    if preferred:
+        scheduled_at = preferred
+    else:
+        urgency = state["urgency"]
+        now     = datetime.datetime.now()
+        if urgency in ["high", "emergency"]:
+            scheduled_at = (now + datetime.timedelta(hours=2)).replace(
+                minute=0, second=0, microsecond=0)
+        elif urgency == "low":
+            scheduled_at = (now + datetime.timedelta(days=1)).replace(
+                hour=10, minute=0, second=0, microsecond=0)
+        else:
+            scheduled_at = (now + datetime.timedelta(days=1)).replace(
+                hour=9, minute=30, second=0, microsecond=0)
+
+    booking = Booking(
+        id=booking_id,
+        user_id=state["request"].user_id,
+        provider_id=selected["id"],
+        service_type=state["intent"],
+        status=BookingStatus.CONFIRMED,
+        scheduled_at=scheduled_at,
+        location=state["request"].location,
+        total_cost=selected.get("price_per_hour", 1500),
+    )
+    db_tool.save_booking(booking)
+    logger.info(f"Booking created: {booking_id} for {selected['name']}")
+
+    end_trace = _make_trace(
+        step_name="booking_simulation",
+        agent_name="booking_execution",
+        description="Booking confirmed and saved to DB",
+        input_data=None,
+        output_data={
+            "booking_id": booking_id,
+            "provider": selected["name"],
+            "scheduled_at": scheduled_at.isoformat(),
+            "cost_per_hour": selected.get("price_per_hour", 1500),
+            "status": "CONFIRMED",
+        },
+        reasoning=f"Booking confirmed for {selected['name']} at {scheduled_at.strftime('%I:%M %p, %d %b %Y')}",
+        tool_used="DB",
+        status="completed",
+        request_id=request_id,
+    )
+
+    return {
+        "booking": booking,
+        "trace": state.get("trace", []) + [start_trace, end_trace],
+    }
+
+
+def followup_node(state: AgentState):
+    """[NODE 5] Follow-up — fully structured frontend-parseable JSON response."""
+    booking       = state.get("booking")
+    provider      = state.get("selected_provider")
+    req           = state["request"]
+    reasoning     = state.get("reasoning", "")
+    top_providers = state.get("top_providers", [])
+    request_id    = state.get("request_id", "")
+
+    # ── NO PROVIDER CASE ────────────────────────────────────────────────
+    if not provider:
+        service_name = (
+            state["intent"].value.replace("_", " ").title()
+            if state.get("intent") else "Service"
+        )
+        final_response = {
+            "status": "unavailable",
+            "service_request": {
+                "service_type": state["intent"].value if state.get("intent") else "other",
+                "service_label": service_name,
+                "urgency": state["urgency"].upper(),
+                "raw_query": req.raw_query,
+            },
+            "appointment": None,
+            "provider": None,
+            "top_providers": [],
+            "next_steps": [
+                {"step_number": 1, "action": "retry",
+                 "title": "Dobara try karein",
+                 "description": "1-2 ghante baad dobara request karein.",
+                 "action_value": None, "action_label": "Retry", "action_type": "button"},
+                {"step_number": 2, "action": "contact_local",
+                 "title": "Local contact karein",
+                 "description": "Agar bohot urgent hai to apne local contacts se rabta karein.",
+                 "action_value": None, "action_label": None, "action_type": "info"},
+                {"step_number": 3, "action": "enable_notifications",
+                 "title": "Notifications on karein",
+                 "description": "App notifications on rakhein taake provider milne par alert mile.",
+                 "action_value": None, "action_label": "Enable", "action_type": "button"},
+            ],
+            "followup": {
+                "reminder_scheduled": False,
+                "reminder_time_display": None,
+                "reminder_time_iso": None,
+                "status_update": "no_provider_found",
+                "completion_confirmation": False,
+            },
+            "error": {
+                "code": "NO_PROVIDER_AVAILABLE",
+                "message": f"Filhal aap ke area mein {service_name} ke liye koi verified provider nahi hai.",
+                "suggestion": "Kuch der baad dobara try karein.",
+            },
+        }
+        # ✅ FIX: correct 8-space indent — inside if block
+        trace_msg = _make_trace(
+            step_name="followup",
+            agent_name="followup",
+            description="No provider available",
+            input_data=None,
+            output_data={"status": "unavailable"},
+            reasoning=f"No {service_name} provider found in range.",
+            tool_used="",
+            status="completed",
+            request_id=request_id,
+        )
+
+    # ── SUCCESS CASE ─────────────────────────────────────────────────────
+    else:
+        time_str      = booking.scheduled_at.strftime("%I:%M %p, %d %b")
+        reminder_dt   = booking.scheduled_at - datetime.timedelta(hours=1)
+        reminder_time = reminder_dt.strftime("%I:%M %p")
+        reminder_iso  = reminder_dt.isoformat()
+        scheduled_iso = booking.scheduled_at.isoformat()
+
+        now       = datetime.datetime.now()
+        diff_days = (booking.scheduled_at.date() - now.date()).days
+        if diff_days == 0:
+            time_desc = f"Today at {booking.scheduled_at.strftime('%I:%M %p')}"
+        elif diff_days == 1:
+            hour = booking.scheduled_at.hour
+            if   5  <= hour < 12: time_desc = "Tomorrow morning"
+            elif 12 <= hour < 17: time_desc = "Tomorrow afternoon"
+            else:                 time_desc = "Tomorrow evening"
+        else:
+            time_desc = booking.scheduled_at.strftime("%A, %d %b at %I:%M %p")
+
+        service_label = state["intent"].value.replace("_", " ").title()
+
+        final_response = {
+            "status": "success",
+            "service_request": {
+                "service_type":  state["intent"].value,
+                "service_label": service_label,
+                "urgency":       state["urgency"].upper(),
+                "raw_query":     req.raw_query,
+                "location":      req.location.address,
+                "time":          time_desc,
+            },
+            "appointment": {
+                "booking_id":             booking.id,
+                "scheduled_time_display": time_str,
+                "scheduled_time_iso":     scheduled_iso,
+                "time_description":       time_desc,
+                "slot_booked":            booking.scheduled_at.strftime("%I:%M %p"),
+                "confirmation_sent":      True,
+                "location": {
+                    "address": req.location.address,
+                    "lat":     req.location.lat,
+                    "lng":     req.location.lng,
+                },
+                "cost_per_hour": provider.get("price_per_hour", 1500),
+                "currency":      "PKR",
+            },
+            "provider": {
+                "id":               provider.get("id"),
+                "name":             provider["name"],
+                "phone":            provider["phone"],
+                "rating":           provider["rating"],
+                "distance_km":      provider.get("distance", 0),
+                "distance_display": f"{provider.get('distance', 0)} km away",
+                "experience_years": provider.get("experience_years", 0),
+                "reasoning":        reasoning,
+            },
+            "top_providers": top_providers,
+            "next_steps": [
+                {"step_number": 1, "action": "provider_call",
+                 "title": "Provider call karega",
+                 "description": f"{provider['name']} aapko 15 minutes ke andar call karega.",
+                 "action_value": provider["phone"],
+                 "action_label": "Call Now", "action_type": "phone_call"},
+                {"step_number": 2, "action": "prepare_space",
+                 "title": "Jagah tayyar karein",
+                 "description": "Service ke liye relevant area clear karein.",
+                 "action_value": None, "action_label": None, "action_type": "info"},
+                {"step_number": 3, "action": "reminder",
+                 "title": "Reminder set hai",
+                 "description": f"Appointment se 1 ghanta pehle ({reminder_time}) reminder milega.",
+                 "action_value": reminder_time,
+                 "action_label": "Set Reminder", "action_type": "reminder"},
+                {"step_number": 4, "action": "track_booking",
+                 "title": "Booking track karein",
+                 "description": f"Booking ID {booking.id} se apna status check karein.",
+                 "action_value": booking.id,
+                 "action_label": "Track", "action_type": "navigation"},
+            ],
+            "followup": {
+                "reminder_scheduled":      True,
+                "reminder_time_display":   reminder_time,
+                "reminder_time_iso":       reminder_iso,
+                "status_update":           "booking_confirmed",
+                "completion_confirmation": False,
+                "summary": f"Reminder scheduled 1 hour before appointment at {reminder_time}.",
+            },
+        }
+        # ✅ FIX: correct 8-space indent — inside else block
+        trace_msg = _make_trace(
+            step_name="followup",
+            agent_name="followup",
+            description="Workflow completed successfully",
+            input_data=None,
+            output_data={"status": "success", "booking_id": booking.id},
+            reasoning=f"Slot booked: {time_str}. Reminder: {reminder_time}.",
+            tool_used="",
+            status="completed",
+            request_id=request_id,
+        )
+
+    return {
+        "final_response": final_response,
+        "trace": state.get("trace", []) + [trace_msg],
+    }
+
+
+def complete_booking_node(state: AgentState):
+    """[NODE 6] Booking Completion — marks booking COMPLETED in DB."""
+    booking    = state.get("booking")
+    request_id = state.get("request_id", "")
+
+    # ✅ FIX: no-booking branch also uses _make_trace — not plain string
+    if not booking:
+        trace_msg = _make_trace(
+            step_name="booking_completion",
+            agent_name="complete_booking",
+            description="No booking found to complete",
+            input_data=None, output_data=None,
+            reasoning="No active booking in state",
+            tool_used="", status="failed",
+            request_id=request_id,
+        )
+        return {"trace": state.get("trace", []) + [trace_msg]}
+
+    booking.status = BookingStatus.COMPLETED
+    db_tool.save_booking(booking)
+
+    trace_msg = _make_trace(
+        step_name="booking_completion",
+        agent_name="complete_booking",
+        description="Booking marked as completed",
+        input_data={"booking_id": booking.id},
+        output_data={"status": "COMPLETED"},
+        reasoning="Service completed by provider",
+        tool_used="DB",
+        status="completed",
+        request_id=request_id,
+    )
+
+    return {
+        "booking": booking,
+        "trace": state.get("trace", []) + [trace_msg],
+    }
+
+
+# ── Build LangGraph ───────────────────────────────────────────────────────────
+workflow = StateGraph(AgentState)
+workflow.add_node("intent_parser",      intent_parser_node)
+workflow.add_node("provider_discovery", provider_discovery_node)
+workflow.add_node("ranking",            ranking_node)
+workflow.add_node("booking_execution",  booking_execution_node)
+workflow.add_node("followup",           followup_node)
+workflow.add_node("complete_booking",   complete_booking_node)
+
+workflow.set_entry_point("intent_parser")
+workflow.add_edge("intent_parser",      "provider_discovery")
+workflow.add_edge("provider_discovery", "ranking")
+workflow.add_edge("ranking",            "booking_execution")
+workflow.add_edge("booking_execution",  "followup")
+workflow.add_edge("followup",           END)
+workflow.add_edge("complete_booking",   END)
+
+app_graph = workflow.compile()
+
+db/mock_db.py
+from typing import List, Dict
+from schemas.models import Provider, ServiceType, Location, Booking
+
+class MockDB:
+    def __init__(self):
+        self.providers: Dict[str, Provider] = {
+            "p1": Provider(
+                id="p1", name="Kamran Khan", service_type=ServiceType.AC_TECHNICIAN, 
+                rating=4.7, location=Location(address="North Nazimabad, Karachi", lat=24.9333, lng=67.0333),
+                phone="+923001234567", price_per_hour=1500.0, experience_years=8
+            ),
+            "p2": Provider(
+                id="p2", name="Zubair Ahmed", service_type=ServiceType.PLUMBER, 
+                rating=4.2, location=Location(address="G-13, Islamabad", lat=33.6333, lng=72.9667),
+                phone="+923007654321", price_per_hour=1000.0, experience_years=5
+            ),
+            "p3": Provider(
+                id="p3", name="Irfan Malik", service_type=ServiceType.ELECTRICIAN, 
+                rating=4.9, location=Location(address="DHA Phase 5, Lahore", lat=31.4697, lng=74.4098),
+                phone="+923211112233", price_per_hour=1200.0, experience_years=12
+            ),
+            "p4": Provider(
+                id="p4", name="Sajid Hussain", service_type=ServiceType.AC_TECHNICIAN, 
+                rating=4.5, location=Location(address="G-13/4, Islamabad", lat=33.6350, lng=72.9700),
+                phone="+923334445566", price_per_hour=1800.0, experience_years=6
+            ),
+            "p5": Provider(
+                id="p5", name="Babar Azam", service_type=ServiceType.PLUMBER, 
+                rating=3.8, location=Location(address="Gulshan-e-Iqbal, Karachi", lat=24.9167, lng=67.0833),
+                phone="+923459998877", price_per_hour=800.0, experience_years=3
+            ),
+            "p6": Provider(
+                id="p6", name="Asif Ali", service_type=ServiceType.ELECTRICIAN, 
+                rating=4.6, location=Location(address="North Nazimabad Block H, Karachi", lat=24.9380, lng=67.0350),
+                phone="+923008887766", price_per_hour=1100.0, experience_years=7
+            ),
+            "p7": Provider(
+                id="p7", name="Hamza Tariq", service_type=ServiceType.TUTOR, 
+                rating=5.0, location=Location(address="Johar Town, Lahore", lat=31.4697, lng=74.2728),
+                phone="+923112223334", price_per_hour=2500.0, experience_years=4
+            ),
+            "p8": Provider(
+                id="p8", name="Noman Ijaz", service_type=ServiceType.CLEANER, 
+                rating=4.3, location=Location(address="F-11, Islamabad", lat=33.6844, lng=72.9875),
+                phone="+923335556667", price_per_hour=600.0, experience_years=2
+            ),
+            "p9": Provider(
+                id="p9", name="Rizwan Khan", service_type=ServiceType.PAINTER, 
+                rating=4.1, location=Location(address="Model Town, Lahore", lat=31.4806, lng=74.3239),
+                phone="+923451231231", price_per_hour=900.0, experience_years=10
+            ),
+            "p10": Provider(
+                id="p10", name="Sania Mirza", service_type=ServiceType.TUTOR, 
+                rating=4.8, location=Location(address="G-11, Islamabad", lat=33.6700, lng=72.9900),
+                phone="+923214445556", price_per_hour=2200.0, experience_years=6
+            ),
+            "p11": Provider(
+                id="p11", name="Farhan Saeed", service_type=ServiceType.AC_TECHNICIAN, 
+                rating=4.4, location=Location(address="Gulberg III, Lahore", lat=31.5100, lng=74.3400),
+                phone="+923003334445", price_per_hour=1600.0, experience_years=5
+            ),
+            "p12": Provider(
+                id="p12", name="Waseem Akram", service_type=ServiceType.PLUMBER, 
+                rating=4.9, location=Location(address="Bahria Town, Karachi", lat=24.9000, lng=67.2000),
+                phone="+923337778889", price_per_hour=2000.0, experience_years=20
+            ),
+            "p13": Provider(
+                id="p13", name="Shoaib Malik", service_type=ServiceType.ELECTRICIAN, 
+                rating=4.0, location=Location(address="Samanabad, Lahore", lat=31.5333, lng=74.3000),
+                phone="+923215556667", price_per_hour=950.0, experience_years=4
+            ),
+            "p14": Provider(
+                id="p14", name="Ayesha Omar", service_type=ServiceType.CLEANER, 
+                rating=4.7, location=Location(address="DHA Phase 2, Islamabad", lat=33.5333, lng=73.1333),
+                phone="+923458889990", price_per_hour=750.0, experience_years=3
+            ),
+            "p15": Provider(
+                id="p15", name="Fawad Khan", service_type=ServiceType.PAINTER, 
+                rating=4.2, location=Location(address="North Nazimabad Block L, Karachi", lat=24.9450, lng=67.0400),
+                phone="+923116667778", price_per_hour=1300.0, experience_years=9
+            ),
+            "p16": Provider(
+                id="p16", name="Zoya Ali", service_type=ServiceType.BEAUTICIAN, 
+                rating=4.9, location=Location(address="F-6, Islamabad", lat=33.7297, lng=73.0747),
+                phone="+923001112223", price_per_hour=3000.0, experience_years=7
+            ),
+            "p17": Provider(
+                id="p17", name="Sara Khan", service_type=ServiceType.BEAUTICIAN, 
+                rating=4.6, location=Location(address="Gulshan-e-Iqbal, Karachi", lat=24.9167, lng=67.0833),
+                phone="+923212223334", price_per_hour=2500.0, experience_years=5
+            ),
+        }
+        self.bookings: List[Booking] = []
+
+    def get_providers_by_type(self, service_type: ServiceType) -> List[Provider]:
+        return [p for p in self.providers.values() if p.service_type == service_type]
+
+    def save_booking(self, booking: Booking):
+        """Save booking - Consistent name used in graph.py"""
+        self.bookings.append(booking)
+        return booking
+
+    def get_booking_by_id(self, booking_id: str) -> Booking | None:
+        """Return a booking by its ID or None if not found."""
+        for b in self.bookings:
+            if b.id == booking_id:
+                return b
+        return None
+
+    def get_all_bookings(self):
+        return self.bookings
+
+
+# Global instance
+db = MockDB()
+
+
+logs/logger.py
+
+from pathlib import Path
+import json
+import threading
+from datetime import datetime
+
+# Determine logs directory relative to this file location
+LOG_DIR = Path(__file__).resolve().parent
+LOG_FILE = LOG_DIR / "agent_interactions.log"
+
+# Ensure logs directory and file exist
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE.touch(exist_ok=True)
+
+_lock = threading.Lock()
+
+
+def _write_log(entry: dict):
+    """Write a JSON log entry to the agent_interactions.log file."""
+    with _lock:
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            json.dump(entry, f, ensure_ascii=False)
+            f.write("\n")
+
+
+def log_interaction(request_id: str, stage: str, message: str, status: str = "info", **extra):
+    """
+    Log a structured interaction to agent_interactions.log.
+
+    Args:
+        request_id: Unique identifier for the request
+        stage: Processing stage (e.g., "request_received", "intent_detection", "provider_discovery")
+        message: Log message
+        status: Status of the interaction (info, success, error, pending)
+        **extra: Additional fields to include in the log entry
+    """
+    entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "request_id": request_id,
+        "stage": stage,
+        "message": message,
+        "status": status,
+    }
+    entry.update(extra)
+    _write_log(entry)
+
+
+def get_logger():
+    """Return a logger instance for general use (optional)."""
+    return _logger
+
+
+class _Logger:
+    def info(self, msg, **kwargs):
+        _write_log({"level": "info", "message": msg, **kwargs})
+
+    def error(self, msg, **kwargs):
+        _write_log({"level": "error", "message": msg, **kwargs})
+
+    def warning(self, msg, **kwargs):
+        _write_log({"level": "warning", "message": msg, **kwargs})
+
+
+_logger = _Logger()
+
+
+routers/requests.py
+# import re
+# from fastapi import APIRouter, HTTPException, Path
+# from schemas.models import ServiceRequest, BookingStatus
+# from agents.graph import app_graph, complete_booking_node
+# from tools.db_tool import db_tool
+# from utils.request_id import generate_request_id
+# from logs.logger import log_interaction
+
+# router = APIRouter(prefix="/requests", tags=["Service Requests"])
+
+# # ── Trace string → structured object ─────────────────────────────────────
+# STAGE_MAP = {
+#     "intent": "intent_detection",
+#     "intent analysis": "intent_detection",
+#     "intent parser": "intent_detection",
+#     "gemini": "llm_analysis",
+#     "analysis source": "llm_analysis",
+#     "service detected": "service_classification",
+#     "priority level": "urgency_classification",
+#     "discovery": "provider_discovery",
+#     "locating": "provider_discovery",
+#     "found": "provider_discovery",
+#     "ranking": "provider_ranking",
+#     "weights": "provider_ranking",
+#     "score": "provider_ranking",
+#     "recommended": "provider_selection",
+#     "decision rationale": "provider_selection",
+#     "action": "booking_execution",
+#     "booking confirmed": "booking_execution",
+#     "scheduled at": "booking_execution",
+#     "follow-up": "followup",
+#     "workflow": "followup",
+#     "reminder": "followup",
+#     "no provider": "followup",
+# }
+
+# def parse_trace_string(raw_trace: list[str]) -> list[dict]:
+#     """Convert raw emoji string trace into structured objects."""
+#     structured = []
+#     for msg in raw_trace:
+#         clean = re.sub(r'[\U0001F000-\U0001FFFF☀-⟿︀-️✀-➿]+', '', msg).strip()
+#         bracket = re.search(r'\[([^\]]+)\]', clean)
+#         raw_stage = bracket.group(1).lower() if bracket else ""
+#         body = re.sub(r'\[.*?\]\s*', '', clean).strip(' :-|')
+#         stage = "trace"
+#         for keyword, mapped in STAGE_MAP.items():
+#             if keyword in raw_stage or keyword in body.lower():
+#                 stage = mapped
+#                 break
+#         status = "completed"
+#         if any(w in body.lower() for w in ["failed", "aborted", "error", "no provider", "no match"]):
+#             status = "failed"
+#         elif any(w in body.lower() for w in ["pending", "searching", "waiting"]):
+#             status = "pending"
+#         if body:
+#             structured.append({
+#                 "stage": stage,
+#                 "message": body[:200],
+#                 "status": status
+#             })
+#     return structured
+
+# @router.post("/")
+# async def create_service_request(request: ServiceRequest):
+#     """Main endpoint – runs the full LangGraph workflow."""
+#     # Generate unique request ID for observability
+#     request_id = generate_request_id()
+
+#     # START trace for user input received
+#     from agents.graph import _make_trace
+#     start_user_input = _make_trace(
+#         step_name="user_input_received",
+#         agent_name="router",
+#         description="Received service request",
+#         input_data={"raw_query": request.raw_query, "user_id": request.user_id, "location": request.location.dict() if request.location else None},
+#         output_data=None,
+#         reasoning="",
+#         tool_used="API",
+#         status="started",
+#         request_id=request_id,
+#     )
+
+#     # Log request receipt
+#     log_interaction(
+#         request_id=request_id,
+#         stage="request_received",
+#         message=f"Received service request: {request.raw_query}",
+#         status="success",
+#         user_id=request.user_id,
+#         raw_query=request.raw_query,
+#         urgency=request.urgency.value,
+#         location=request.location.dict() if request.location else None
+#     )
+
+#     # END trace for user input received
+#     end_user_input = _make_trace(
+#         step_name="user_input_received",
+#         agent_name="router",
+#         description="Service request logged",
+#         input_data={"raw_query": request.raw_query},
+#         output_data={"status": "logged"},
+#         reasoning="",
+#         tool_used="API",
+#         status="completed",
+#         request_id=request_id,
+#     )
+
+#     initial_state = {
+#         "request": request,
+#         "intent": None,
+#         "language": request.language_detected or "en",
+#         "urgency": request.urgency.value,
+#         "providers": [],
+#         "top_providers": [],
+#         "selected_provider": None,
+#         "booking": None,
+#         "trace": [start_user_input, end_user_input],
+#         "reasoning": "",
+#         "final_response": None,
+#         "request_id": request_id  # Add request_id to state for agent tracing
+#     }
+
+#     try:
+#         result = app_graph.invoke(initial_state)
+
+#         # Log successful processing
+#         log_interaction(
+#             request_id=request_id,
+#             stage="workflow_completed",
+#             message="LangGraph workflow completed successfully",
+#             status="success",
+#             booking_id=result.get("booking").id if result.get("booking") else None,
+#             intent=result.get("intent").value if result.get("intent") else None
+#         )
+#     except Exception as e:
+#         # Log error
+#         log_interaction(
+#             request_id=request_id,
+#             stage="workflow_failed",
+#             message=f"Workflow execution failed: {str(e)}",
+#             status="error",
+#             error=str(e)
+#         )
+#         raise HTTPException(status_code=500, detail=f"Workflow execution failed: {str(e)}")
+
+#     fo = result.get("final_response") or {}
+#     raw_trace = result.get("trace", [])
+#     booking = result.get("booking")
+#     status = fo.get("status", "error")
+
+#     structured_trace = raw_trace  # Traces are now structured dicts
+#     raw_steps = fo.get("next_steps", [])
+#     structured_steps = []
+#     for s in raw_steps:
+#         structured_steps.append({
+#             "step": s.get("step_number", 0),
+#             "title": s.get("title", ""),
+#             "description": s.get("description", ""),
+#             "type": _map_action_type(s.get("action_type", "info")),
+#             "action_value": s.get("action_value"),
+#             "action_label": s.get("action_label")
+#         })
+
+#     return {
+#         "success": status == "success",
+#         "data": {
+#             "status": status,
+#             "message": _build_message(fo, status),
+#             "service_request": fo.get("service_request", {}),
+#             "provider": fo.get("provider"),
+#             "appointment": fo.get("appointment"),
+#             "top_providers": fo.get("top_providers"),
+#             "next_steps": structured_steps,
+#             "followup": fo.get("followup", {}),
+#             "error": fo.get("error"),
+#             "trace": structured_trace,
+#         },
+#         "meta": {
+#             "booking_id": booking.id if booking else None,
+#             "detected_intent": result.get("intent").value if result.get("intent") else None,
+#             "detected_language": result.get("language"),
+#             "urgency": result.get("urgency"),
+#         }
+#     }
+
+# @router.post("/bookings/{booking_id}/complete")
+# async def complete_booking(booking_id: str):
+#     """Mark a booking as completed and update follow-up."""
+#     # Generate request ID for this operation
+#     request_id = generate_request_id()
+
+#     # Log booking completion request
+#     log_interaction(
+#         request_id=request_id,
+#         stage="booking_completion_requested",
+#         message=f"Booking {booking_id} completion requested",
+#         status="success"
+#     )
+
+#     # Build minimal state to invoke complete_booking_node
+#     initial_state = {
+#         "booking": db_tool.get_booking_by_id(booking_id),
+#         "trace": [],
+#         "request_id": request_id
+#     }
+
+#     try:
+#         result = complete_booking_node(initial_state)
+
+#         # Log successful booking completion
+#         log_interaction(
+#             request_id=request_id,
+#             stage="booking_completed",
+#             message=f"Booking {booking_id} marked as completed",
+#             status="success",
+#             result=result
+#         )
+#     except Exception as e:
+#         # Log error
+#         log_interaction(
+#             request_id=request_id,
+#             stage="booking_completion_failed",
+#             message=f"Booking completion failed: {str(e)}",
+#             status="error",
+#             error=str(e)
+#         )
+#         raise HTTPException(status_code=500, detail=f"Booking completion failed: {str(e)}")
+
+#     return {
+#         "success": True,
+#         "message": f"Booking {booking_id} marked as completed.",
+#         "trace": result.get("trace", [])
+#     }
+
+# def _map_action_type(action_type: str) -> str:
+#     mapping = {
+#         "phone_call": "action",
+#         "reminder":   "info",
+#         "navigation": "info",
+#         "button":     "action",
+#         "info":       "info",
+#         "warning":    "warning",
+#     }
+#     return mapping.get(action_type, "info")
+
+# def _build_message(fo: dict, status: str) -> str:
+#     if status == "success":
+#         provider = fo.get("provider", {})
+#         appt = fo.get("appointment", {})
+#         return (
+#             f"Booking confirmed. "
+#             f"{provider.get('name', 'Provider')} will contact you before "
+#             f"{appt.get('scheduled_time_display', 'your appointment')}."
+#         )
+#     error = fo.get("error", {})
+#     return error.get("message", "Service request could not be completed.")
+
+
+# -------------------------------------------------------------------
+import re
+from fastapi import APIRouter, HTTPException
+from schemas.models import ServiceRequest, BookingStatus
+from agents.graph import app_graph, complete_booking_node, _make_trace
+from tools.db_tool import db_tool
+from utils.request_id import generate_request_id
+from logs.logger import log_interaction
+
+router = APIRouter(prefix="/requests", tags=["Service Requests"])
+
+
+@router.post("/")
+async def create_service_request(request: ServiceRequest):
+    """Main endpoint — runs the full LangGraph agentic workflow."""
+    request_id = generate_request_id()
+
+    # Trace: user input received
+    start_user_input = _make_trace(
+        step_name="user_input_received",
+        agent_name="router",
+        description="Received service request",
+        input_data={
+            "raw_query": request.raw_query,
+            "user_id":   request.user_id,
+            "location":  request.location.model_dump() if request.location else None,  # ✅ model_dump()
+        },
+        output_data=None,
+        reasoning="",
+        tool_used="API",
+        status="started",
+        request_id=request_id,
+    )
+
+    log_interaction(
+        request_id=request_id,
+        stage="request_received",
+        message=f"Received: {request.raw_query}",
+        status="success",
+        user_id=request.user_id,
+        raw_query=request.raw_query,
+        urgency=request.urgency.value,
+        location=request.location.model_dump() if request.location else None,  # ✅ model_dump()
+    )
+
+    end_user_input = _make_trace(
+        step_name="user_input_received",
+        agent_name="router",
+        description="Service request logged",
+        input_data={"raw_query": request.raw_query},
+        output_data={"status": "logged"},
+        reasoning="",
+        tool_used="API",
+        status="completed",
+        request_id=request_id,
+    )
+
+    initial_state = {
+        "request":           request,
+        "intent":            None,
+        "language":          request.language_detected or "en",
+        "urgency":           request.urgency.value,
+        "providers":         [],
+        "top_providers":     [],
+        "selected_provider": None,
+        "booking":           None,
+        "trace":             [start_user_input, end_user_input],
+        "reasoning":         "",
+        "final_response":    None,
+        "request_id":        request_id,
+    }
+
+    try:
+        result = app_graph.invoke(initial_state)
+        log_interaction(
+            request_id=request_id,
+            stage="workflow_completed",
+            message="LangGraph workflow completed successfully",
+            status="success",
+            booking_id=result.get("booking").id if result.get("booking") else None,
+            intent=result.get("intent").value if result.get("intent") else None,
+        )
+    except Exception as e:
+        log_interaction(
+            request_id=request_id,
+            stage="workflow_failed",
+            message=f"Workflow failed: {str(e)}",
+            status="error",
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=f"Workflow execution failed: {str(e)}")
+
+    fo      = result.get("final_response") or {}
+    booking = result.get("booking")
+    status  = fo.get("status", "error")
+
+    # Build structured next_steps for frontend
+    structured_steps = [
+        {
+            "step":         s.get("step_number", 0),
+            "title":        s.get("title", ""),
+            "description":  s.get("description", ""),
+            "type":         _map_action_type(s.get("action_type", "info")),
+            "action_value": s.get("action_value"),
+            "action_label": s.get("action_label"),
+        }
+        for s in fo.get("next_steps", [])
+    ]
+
+    return {
+        "success": status == "success",
+        "data": {
+            "status":          status,
+            "message":         _build_message(fo, status),
+            "service_request": fo.get("service_request", {}),
+            "provider":        fo.get("provider"),
+            "appointment":     fo.get("appointment"),
+            "top_providers":   fo.get("top_providers"),
+            "next_steps":      structured_steps,
+            "followup":        fo.get("followup", {}),
+            "error":           fo.get("error"),
+            "trace":           result.get("trace", []),
+        },
+        "meta": {
+            "booking_id":        booking.id if booking else None,
+            "detected_intent":   result.get("intent").value if result.get("intent") else None,
+            "detected_language": result.get("language"),
+            "urgency":           result.get("urgency"),
+            "request_id":        request_id,
+        },
+    }
+
+
+@router.post("/bookings/{booking_id}/complete")
+async def complete_booking(booking_id: str):
+    """Mark a booking as completed."""
+    request_id = generate_request_id()
+
+    log_interaction(
+        request_id=request_id,
+        stage="booking_completion_requested",
+        message=f"Booking {booking_id} completion requested",
+        status="success",
+    )
+
+    initial_state = {
+        "booking":    db_tool.get_booking_by_id(booking_id),
+        "trace":      [],
+        "request_id": request_id,
+    }
+
+    try:
+        result = complete_booking_node(initial_state)
+        log_interaction(
+            request_id=request_id,
+            stage="booking_completed",
+            message=f"Booking {booking_id} marked as completed",
+            status="success",
+        )
+    except Exception as e:
+        log_interaction(
+            request_id=request_id,
+            stage="booking_completion_failed",
+            message=f"Completion failed: {str(e)}",
+            status="error",
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=f"Booking completion failed: {str(e)}")
+
+    return {
+        "success": True,
+        "message": f"Booking {booking_id} marked as completed.",
+        "trace":   result.get("trace", []),
+    }
+
+
+def _map_action_type(action_type: str) -> str:
+    return {
+        "phone_call": "action",
+        "reminder":   "info",
+        "navigation": "info",
+        "button":     "action",
+        "info":       "info",
+        "warning":    "warning",
+    }.get(action_type, "info")
+
+
+def _build_message(fo: dict, status: str) -> str:
+    if status == "success":
+        provider = fo.get("provider", {})
+        appt     = fo.get("appointment", {})
+        return (
+            f"Booking confirmed. "
+            f"{provider.get('name', 'Provider')} will contact you before "
+            f"{appt.get('scheduled_time_display', 'your appointment')}."
+        )
+    return fo.get("error", {}).get("message", "Service request could not be completed.")
+
+schemas/models.py
+
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+from enum import Enum
+
+
+class ServiceType(str, Enum):
+    AC_TECHNICIAN = "ac_technician"
+    PLUMBER = "plumber"
+    ELECTRICIAN = "electrician"
+    TUTOR = "tutor"
+    CLEANER = "cleaner"
+    PAINTER = "painter"
+    BEAUTICIAN = "beautician"
+    OTHER = "other"
+
+
+class UrgencyLevel(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    EMERGENCY = "emergency"
+
+
+class BookingStatus(str, Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class Location(BaseModel):
+    """User location details"""
+    address: str = Field(..., description="Full address of the user")
+    lat: float = Field(..., ge=-90, le=90, description="Latitude")
+    lng: float = Field(..., ge=-180, le=180, description="Longitude")
+
+
+class ServiceRequest(BaseModel):
+    """Main input model for service requests"""
+    user_id: str = Field(..., description="Unique user identifier")
+    raw_query: str = Field(..., description="Original natural language query (English/Roman Urdu/Urdu)")
+    
+    language_detected: Optional[str] = Field(default="en", description="Detected language")
+    service_type: Optional[ServiceType] = Field(default=None, description="Pre-detected service type if available")
+    
+    location: Location = Field(..., description="User location")
+    urgency: UrgencyLevel = Field(default=UrgencyLevel.MEDIUM, description="Urgency level of request")
+    
+    preferred_time: Optional[datetime] = Field(default=None, description="User preferred service time")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+
+
+class Provider(BaseModel):
+    """Service provider details"""
+    id: str
+    name: str
+    service_type: ServiceType
+    rating: float = Field(..., ge=0, le=5)
+    location: Location
+    phone: str
+    price_per_hour: float = Field(..., gt=0)
+    experience_years: int = Field(..., ge=0)
+    availability: bool = True
+
+
+class Booking(BaseModel):
+    """Booking record"""
+    id: str
+    user_id: str
+    provider_id: str
+    service_type: ServiceType
+    
+    status: BookingStatus = Field(default=BookingStatus.CONFIRMED)  # Changed to CONFIRMED for simulation
+    scheduled_at: datetime
+    location: Location
+    total_cost: Optional[float] = None
+    
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+# Optional: Config for better JSON handling
+class Config:
+    use_enum_values = True
+
+
+
+tools/maps_tool.py
+
+# pyrefly: ignore [missing-import]
+import googlemaps
+import os
+import logging
+from typing import List, Dict
+from math import radians, cos, sin, asin, sqrt
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class MapsTool:
+    def __init__(self):
+        self.api_key = os.getenv("GOOGLE_MAPS_API_KEY")
+        self.gmaps = None
+        
+        # Check if API key is missing or is a placeholder
+        if not self.api_key or "your_" in self.api_key or self.api_key == "":
+            logger.warning("GOOGLE_MAPS_API_KEY is missing or invalid. Using mock/fallback calculations.")
+            return
+
+        try:
+            self.gmaps = googlemaps.Client(key=self.api_key)
+            # Simple test to see if key is valid (optional, but good for early failure)
+            logger.info("Google Maps client initialized successfully.")
+        except Exception as e:
+            logger.error(f"Failed to initialize Google Maps client: {str(e)}. Falling back to mock calculations.")
+            self.gmaps = None
+
+    def get_distance(self, lat1, lng1, lat2, lng2):
+        """Calculate the great circle distance in kilometers between two points using Haversine formula."""
+        # We use Haversine as the primary/fallback distance tool for performance
+        # since we don't necessarily need Google's Matrix API for simple proximity
+        R = 6371  # Radius of earth in kilometers
+        dLat = radians(lat2 - lat1)
+        dLon = radians(lng2 - lng1)
+        lat1 = radians(lat1)
+        lat2 = radians(lat2)
+
+        a = sin(dLat/2)**2 + cos(lat1)*cos(lat2)*sin(dLon/2)**2
+        c = 2*asin(sqrt(a))
+        distance = R * c
+        return distance
+
+    def geocode(self, address: str):
+        """Convert address to lat/lng using Google Maps or a fallback."""
+        if not self.gmaps:
+            logger.warning(f"Geocoding '{address}' using fallback coordinates (Karachi).")
+            # Default to Karachi coordinates for testing
+            return {"lat": 24.8607, "lng": 67.0011} 
+        
+        try:
+            result = self.gmaps.geocode(address)
+            if result:
+                return result[0]['geometry']['location']
+        except Exception as e:
+            logger.error(f"Geocoding error: {str(e)}")
+            
+        return {"lat": 24.8607, "lng": 67.0011} 
+
+maps_tool = MapsTool()
+
+
+
+
+tools/db_tool.py
+
+from schemas.models import Booking, ServiceType, Provider
+from typing import List
+
+# Import from your MockDB file
+from db.mock_db import db   # ← Adjust path if your folder structure is different
+
+
+class DBTool:
+    def get_providers_by_type(self, service_type: ServiceType) -> List[Provider]:
+        """Get providers by service type"""
+        return db.get_providers_by_type(service_type)
+
+    def save_booking(self, booking: Booking):
+        """Save booking - Used in graph.py"""
+        return db.save_booking(booking)
+
+    def get_provider_by_id(self, provider_id: str) -> Provider | None:
+        """Optional: Get single provider by ID"""
+        return db.providers.get(provider_id)
+
+    def get_booking_by_id(self, booking_id: str) -> Booking | None:
+        """Get booking by ID - Used for completion endpoint"""
+        return db.get_booking_by_id(booking_id)
+
+    def get_all_bookings(self):
+        """Optional: For debugging"""
+        return db.get_all_bookings()
+
+
+# Global instance
+db_tool = DBTool()
+
+utils/request_id.py
+
+import uuid
+
+def generate_request_id() -> str:
+    """Generate a short unique request identifier (8 hex characters)."""
+    return uuid.uuid4().hex[:8]
+
+
+
+config.py
+
+# Configuration constants for Antigravity Service Orchestrator
+
+# Maximum distance (km) a provider can be from the user to be considered
+MAX_DISTANCE_KM: float = 10.0
+
+# Number of top providers to return in the recommendation list
+TOP_N_PROVIDERS: int = 3
+
+# Scoring weights – can be tuned for production
+WEIGHT_RATING: float = 3.0
+WEIGHT_DISTANCE: float = 1.0  # will be multiplied by urgency factor later
+WEIGHT_EXPERIENCE: float = 0.2
+
+# Urgency distance multiplier – higher urgency favours closer providers
+URGENCY_DISTANCE_MULTIPLIER = {
+    "high": 2.0,
+    "emergency": 3.0,
+    "medium": 1.0,
+    "low": 0.5,
+}
+
+
+main.py
+
+import os
+from dotenv import load_dotenv
+
+# Load environment variables before importing other modules
+load_dotenv()
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from routers import requests
+import uvicorn
+
+app = FastAPI(
+    title="Informal Service Orchestrator API",
+    description="A multi-agent system for informal service booking in Pakistan.",
+    version="1.0.0"
+)
+
+# CORS Middleware
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+
+# CORS Middleware
+# Development: allow all origins (*). For production or demo, set the ALLOWED_ORIGINS environment variable
+# to a comma‑separated list of allowed origins, e.g. "https://myapp.vercel.app,http://localhost:3000"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include Routers
+app.include_router(requests.router)
+
+@app.get("/")
+async def health_check():
+    return {
+        "status": "online",
+        "service": "Informal Service Orchestrator",
+        "version": "1.0.0"
+    }
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    # Note: Use reload=True only in development
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+
+
+PS D:\informal-service-orchestrator\service-orchestrator-backend> dir   
+
+    Directory: D:\informal-service-orchestrator\service-orchestrator-backend
+
+Mode                 LastWriteTime         Length Name
+
+----                 -------------         ------ ----
+
+d-----         5/18/2026   2:45 PM                .venv
+
+d-----         5/18/2026  11:53 PM                agents
+
+d-----         5/18/2026  11:53 PM                db
+
+d-----         5/18/2026  11:53 PM                logs
+
+d-----         5/18/2026  11:53 PM                routers
+
+d-----         5/18/2026  11:53 PM                schemas
+
+d-----         5/16/2026   1:59 AM                scratch
+
+d-----         5/15/2026  11:12 PM                services
+
+d-----         5/18/2026  11:53 PM                tools
+
+d-----         5/18/2026  11:53 PM                utils
+
+-a----         5/15/2026  11:34 PM            244 .env
+
+-a----         5/15/2026  11:34 PM            219 .env.example
+
+-a----         5/16/2026   1:25 PM             56 .gitignore
+
+-a----         5/17/2026  11:25 PM           6398 API_INTEGRATION_SPEC_PROD.md
+
+-a----         5/16/2026  10:42 PM            699 api_test.http
+
+-a----         5/17/2026   1:37 AM            623 config.py
+
+-a----         5/17/2026   6:43 PM           1280 main.py
+
+-a----         5/16/2026   1:31 AM           5162 README.md
+
+-a----         5/17/2026   7:28 PM            230 request.json
+
+-a----         5/15/2026  11:12 PM            131 requirements.txt
+
+-a----         5/16/2026   3:50 AM           9020 test_flow.py
+
+PS D:\informal-service-orchestrator\service-orchestrator-backend>
+
+
+
+this is document challneg 2 very import read analyse proper 
+Challenge 2: AI Service Orchestrator for Informal Economy 
+Challenge Overview 
+Informal economy, including plumbers, electricians, tutors, beauticians, and home service 
+providers, operates largely through: 
+● WhatsApp messages 
+● phone calls 
+● informal referrals 
+This results in: 
+● inefficient service matching 
+● missed opportunities 
+● lack of automation 
+● poor user experience 
+At the same time, users struggle to find: 
+● reliable services quickly 
+● availability in real time 
+● trusted providers nearby 
+Problem Statement 
+Build an Agentic AI System that automates the end-to-end lifecycle of a service request — 
+from user intent to booking and follow-up. 
+Your system must: 
+1. Understand user service requests (in natural language) 
+2. Identify relevant providers using location/context 
+3. Select or recommend the best provider 
+4. Simulate booking and confirmation 
+5. Handle follow-up interactions 
+6. Show complete reasoning and workflow execution 
+Mandatory Requirement: Google Antigravity 
+Teams MUST use Google Antigravity as the core platform to: 
+● orchestrate agent workflows 
+● manage multi-step reasoning 
+● integrate tools (Maps, Search, APIs) 
+● execute actions (booking, notifications, etc.) 
+Use of external LLMs is allowed, but Antigravity must be central to system logic and 
+orchestration. 
+Example User Scenario 
+User input (Roman Urdu / Urdu / English): 
+“Mujhe kal subah G-13 mein AC technician chahiye” 
+Expected Output 
+Service Request: 
+AC Technician 
+Location: 
+G-13 
+Time: 
+Tomorrow morning 
+Recommended Provider: 
+Ali AC Services (2.1 km away) 
+Reasoning: 
+Closest available provider with high rating 
+Simulated Booking: - Slot booked: 10:00 AM - Confirmation sent 
+Follow-up: 
+Reminder scheduled 1 hour before appointment 
+System Requirements 
+1. Intent Understanding 
+● Process natural language input 
+● Support: 
+§  Urdu 
+§  Roman Urdu 
+§  English 
+● Extract: 
+§  service type 
+§  location 
+§  time 
+2. Provider Discovery 
+● Use: 
+§  mock dataset OR 
+§  Google Maps / Places APIs 
+● Identify: 
+§  nearby providers 
+§  service category match 
+3. Matching & Ranking 
+● Rank providers based on: 
+§  distance 
+§  availability 
+§  rating (simulated or real) 
+● Provide clear reasoning for selection 
+4. Decision & Recommendation 
+● Select best provider OR show top options 
+● Explain decision in simple terms 
+5. Action Simulation (CRITICAL REQUIREMENT) 
+System must simulate: 
+● booking confirmation 
+● provider assignment 
+● scheduling 
+Simulation can include: 
+● updating a mock booking system 
+● creating a confirmation message 
+● writing to a database/spreadsheet 
+● generating a booking receipt 
+6. Follow-Up Automation 
+● Simulate: 
+§  reminders 
+§  status updates 
+§  completion confirmation 
+7. Agentic Workflow (MANDATORY) 
+System must demonstrate: 
+● multiple agents OR structured reasoning pipeline 
+● planning → decision → action → follow-up 
+● traceable logs of: 
+§  decisions 
+§  tool usage 
+§  action execution 
+Deliverables 
+1. Working Prototype with Mobile App (MUST) and Web App (Optional) 
+2. Demo Video (3–5 minutes) 
+Must clearly show: 
+● user input 
+● system understanding 
+● provider matching 
+● booking simulation 
+● follow-up workflow 
+3. Agent Trace / Logs 
+● reasoning steps 
+● agent interactions 
+● action execution logs 
+4. Documentation (README) 
+Include: 
+● system architecture 
+● how Antigravity is used 
+● APIs/tools used 
+● assumptions and limitations 
+Evaluation Criteria 
+1. Use of Google Antigravity — 25% 
+● Core orchestration handled via Antigravity 
+● Effective use of tools (Maps, APIs) 
+● Demonstrates planning + execution 
+2. Agentic Reasoning & Workflow — 20% 
+● Multi-step reasoning 
+● Logical flow from request → decision → action 
+● Evidence of autonomy 
+3. Matching Quality & Decision Logic — 20% 
+● Relevant provider selection 
+● Clear ranking criteria 
+● Strong reasoning behind decisions 
+4. Action Simulation & Execution — 15% 
+● Booking process realistically simulated 
+● Clear system state change (confirmation, scheduling) 
+● End-to-end workflow demonstrated 
+5. Technical Implementation — 10% 
+● Clean architecture 
+● API/tool integration 
+● Robust handling of edge cases 
+6. Innovation & UX — 10% 
+● Creative approach 
+● Intuitive interface 
+● Clear and engaging demo 
+Important Guidelines 
+● This is NOT a simple listing or booking app 
+● Focus on agentic automation, not UI complexity 
+● At least one booking must be simulated end-to-end 
+● Must demonstrate reasoning + decision-making 
+● Use mock data if real APIs are unavailable 
+● Avoid use of real personal/sensitive data
+
+
+then overall summary proper standard professional jo ma google antigravity ko dou wo meray folder ky structure ko ko smjah aur jo kam kia hy wo step by step dekhy sayi sy
+
