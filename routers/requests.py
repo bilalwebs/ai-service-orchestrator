@@ -1,10 +1,12 @@
 import re
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, Path
-from schemas.models import ServiceRequest, BookingStatus
+from schemas.models import ServiceRequest, BookingStatus, AdminRequestLog
 from agents.graph import app_graph, complete_booking_node
 from tools.db_tool import db_tool
 from utils.request_id import generate_request_id
 from logs.logger import log_interaction
+from db.mock_db import db
 
 router = APIRouter(prefix="/requests", tags=["Service Requests"])
 
@@ -160,6 +162,20 @@ async def create_service_request(request: ServiceRequest):
             "action_value": s.get("action_value"),
             "action_label": s.get("action_label")
         })
+
+    # Log the completed request for admin inspection
+    db.log_request(AdminRequestLog(
+        id=request_id,
+        user_id=request.user_id,
+        raw_query=request.raw_query,
+        urgency=request.urgency.value,
+        intent=result.get("intent").value if result.get("intent") else None,
+        language=result.get("language", "en"),
+        status=status,
+        booking_id=booking.id if booking else None,
+        trace=[t if isinstance(t, dict) else t for t in structured_trace],
+        created_at=datetime.now().isoformat()
+    ))
 
     return {
         "success": status == "success",
