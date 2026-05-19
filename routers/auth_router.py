@@ -15,7 +15,6 @@ router = APIRouter()
 # Temporary database
 users_db = []
 
-# ✅ FIX 1: tokenUrl MUST be "token"
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 
@@ -43,19 +42,21 @@ def register(user: UserRegister):
     users_db.append(new_user)
 
     return {
-        "message": "User registered successfully"
+        "message": "User registered successfully",
+        "name": user.name,
+        "email": user.email,
+        "hashed_password": hashed_pw
     }
 
 
 # =========================
-# LOGIN API (FIXED FOR SWAGGER)
+# LOGIN API
 # =========================
 @router.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
     for db_user in users_db:
 
-        # username = email in Swagger OAuth2
         if db_user["email"] == form_data.username:
 
             if verify_password(form_data.password, db_user["password"]):
@@ -65,6 +66,8 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
                 )
 
                 return {
+                    "message": "Login successful",
+                    "email": db_user["email"],
                     "access_token": token,
                     "token_type": "bearer"
                 }
