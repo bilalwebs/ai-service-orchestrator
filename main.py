@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 import traceback
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from routers import requests, admin
+from routers.auth_router import router as auth_router
 from fastapi.responses import JSONResponse
 from routers import requests, admin, bookings, services
 from schemas.response import api_response
@@ -36,6 +38,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+app.include_router(auth_router)
 
 # ── FIX 5: Global error handlers — consistent JSON error shape for all failures ──
 
