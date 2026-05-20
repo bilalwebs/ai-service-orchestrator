@@ -16,7 +16,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Override sqlalchemy.url from environment variable
-database_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/informal_services")
+database_url = os.getenv("DATABASE_URL", "sqlite:///./informal_services.db")
 config.set_main_option("sqlalchemy.url", database_url)
 
 # Import ORM models so Alembic autogenerate can detect schema changes

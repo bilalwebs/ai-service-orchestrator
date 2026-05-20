@@ -40,5 +40,5 @@ The frontend will likely need more than just the main orchestrator trigger to fu
 
 ### Phase 4: Database Preparation
 While currently using a mock DB, prepare the schemas for migration.
-1. **Define ORM Models**: If transitioning to PostgreSQL or similar, add SQLAlchemy models or Prisma schema mirroring the Pydantic schemas in `models.py`.
+1. **Define ORM Models**: If transitioning to SQLite or similar, add SQLAlchemy models mirroring the Pydantic schemas in `models.py`.
 2. **Abstract DB Tool**: Ensure `db_tool.py` interface remains identical so that switching from `mock_db` to the real DB doesn't require changes in the agent logic.

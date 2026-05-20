@@ -1,7 +1,7 @@
 """
-db/data_seeder.py — Seeds the PostgreSQL database with the initial 17 providers.
+db/data_seeder.py — Seeds the SQLite database with the initial 17 providers.
 
-Run once after the first migration on a fresh PostgreSQL deployment:
+Run once after initializing your SQLite database:
     python -m db.data_seeder
 
 Only inserts providers that do NOT already exist (idempotent).
@@ -39,10 +39,10 @@ PROVIDER_SEED_DATA: List[Dict[str, Any]] = [
 
 
 def run_seed() -> None:
-    """Insert all initial providers into the PostgreSQL database (idempotent)."""
+    """Insert all initial providers into the SQL database (idempotent)."""
     use_real_db = os.getenv("USE_REAL_DB", "false").lower() == "true"
     if not use_real_db:
-        print("[data_seeder] USE_REAL_DB is not set to true. Seeder only runs against PostgreSQL.")
+        print("[data_seeder] USE_REAL_DB is not set to true. Seeder only runs against a real database.")
         print("[data_seeder] Set USE_REAL_DB=true in your .env and re-run.")
         return
 

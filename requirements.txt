@@ -12,3 +12,7 @@ psycopg2-binary
 alembic
 pytest
 httpx
+passlib
+python-jose[cryptography]
+python-multipart
+dotenv

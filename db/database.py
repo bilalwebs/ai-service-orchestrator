@@ -2,15 +2,11 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-# Use environment variable or fallback to postgresql
-# You can set USE_REAL_DB=true to activate this.
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/informal_services")
+# SQLite database configuration
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./informal_services.db")
 
-# Handle sqlite fallback for local testing without postgres
-if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-else:
-    engine = create_engine(DATABASE_URL)
+# Initialize SQLite engine with check_same_thread=False for safe multi-threaded routing
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

@@ -1,7 +1,7 @@
 """
 database_service.py — Data Access Layer between agents/API and the database.
 
-Set  USE_REAL_DB=true  in your .env to activate SQLAlchemy / PostgreSQL.
+Set  USE_REAL_DB=true  in your .env to activate SQLAlchemy / SQLite.
 When USE_REAL_DB is absent or false, the original MockDB is used (default).
 
 The interface is IDENTICAL either way, so no changes are needed in agents or
@@ -184,7 +184,7 @@ class SQLDatabaseService:
 
 if USE_REAL_DB:
     db_service = SQLDatabaseService()
-    print("[database_service] Using SQLAlchemy / PostgreSQL backend.")
+    print("[database_service] Using SQLAlchemy SQL backend.")
 else:
     db_service = MockDatabaseService()
     print("[database_service] Using MockDB backend (development).")

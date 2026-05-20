@@ -45,7 +45,7 @@ The backend follows a clean, modular, domain-driven architecture demonstrating s
 [ Tools & Repositories ] (DB Abstraction, Provider / Booking Logic)
     │
     ▼
-[ Database Layer ] (Mock In-Memory DB OR PostgreSQL)
+[ Database Layer ] (Mock In-Memory DB OR SQLite)
 ```
 
 ### The AI Workflow (Step-by-step)
@@ -64,7 +64,7 @@ When a user submits a raw request (e.g., *"Mujhe kal subah G-13 mein AC technici
 
 ### Prerequisites
 - Python 3.10+
-- PostgreSQL (Optional, for production mode)
+- SQLite (For persistent database mode)
 
 ### Setup Commands
 
@@ -90,7 +90,7 @@ When a user submits a raw request (e.g., *"Mujhe kal subah G-13 mein AC technici
    ```env
    # .env
    USE_REAL_DB=false
-   DATABASE_URL=postgresql://user:password@localhost:5432/informal_services
+   DATABASE_URL=sqlite:///./informal_services.db
    WORKFLOW_TIMEOUT_SECONDS=60
    ALLOWED_ORIGINS=*
    ```
@@ -136,9 +136,9 @@ Action simulation is a core requirement of this challenge. Our system maintains 
 - Uses a robust, in-memory Python dictionary store heavily populated with localized dummy data.
 - Perfect for demonstrating the booking simulation, scheduling, and provider assignment rapidly without external dependencies.
 
-### PostgreSQL (Production Ready)
+### SQLite (Persistent SQL Database)
 - **`USE_REAL_DB=true`**
-- Uses SQLAlchemy 2.0 with PostgreSQL for persistent, production-grade tracking of bookings, users, and provider availability.
+- Uses SQLAlchemy 2.0 with SQLite for persistent local tracking of bookings, users, and provider availability without any database setup overhead.
 
 ---
 

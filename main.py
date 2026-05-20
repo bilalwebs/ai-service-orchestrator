@@ -25,9 +25,9 @@ async def lifespan(app: FastAPI):
         from db.database import engine, Base
         import db.models  # ensure ORM models are registered
         Base.metadata.create_all(bind=engine)
-        print("[startup] PostgreSQL tables created / verified.")
+        print("[startup] SQL database tables created / verified.")
     else:
-        print("[startup] Using MockDB. Set USE_REAL_DB=true to switch to PostgreSQL.")
+        print("[startup] Using MockDB. Set USE_REAL_DB=true to switch to SQLite.")
     yield
     # Shutdown hooks can go here
 
@@ -130,7 +130,7 @@ async def health_check():
             "status": "online",
             "service": "Informal Service Orchestrator",
             "version": "1.0.0",
-            "db_mode": "postgresql" if USE_REAL_DB else "mock",
+            "db_mode": "sqlite" if USE_REAL_DB else "mock",
         }
     )
 

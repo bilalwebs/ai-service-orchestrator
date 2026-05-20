@@ -18,7 +18,7 @@ We successfully implemented a sophisticated AI state machine powered by LangGrap
 ### 2. Dual-Mode Database Layer
 We built a resilient abstraction layer (`tools/database_service.py`) supporting two modes:
 - **MockDB**: A high-speed, in-memory dictionary store pre-loaded with realistic dummy data across Pakistani cities (Karachi, Lahore, Islamabad) for instant development and testing.
-- **PostgreSQL**: A full production-ready relational database using SQLAlchemy and Alembic migrations.
+- **SQLite**: A lightweight, self-contained relational SQL database using SQLAlchemy and Alembic migrations for persistent local testing.
 - **Switching**: The system toggles between them effortlessly via the `USE_REAL_DB` environment variable without changing a single line of business logic.
 
 ### 3. Production-Grade API Standardization
