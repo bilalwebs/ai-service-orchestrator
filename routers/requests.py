@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Dict
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from schemas.models import ServiceRequest, AdminRequestLog
+from schemas.models import ServiceRequest, AdminRequestLog, ProviderSelectionBody
 from agents.graph import (
     app_graph, complete_booking_node, _make_trace, llm,
     intent_parser_node, provider_discovery_node,
@@ -63,6 +63,10 @@ async def _get_plan_message(query: str) -> str:
 
 # Global registry to track active asyncio tasks by request_id
 active_tasks: Dict[str, asyncio.Task] = {}
+
+# Provider selection pause mechanism: request_id → asyncio.Event / chosen provider_id
+_pending_selections: Dict[str, asyncio.Event] = {}
+_selection_results: Dict[str, str] = {}
 
 
 @router.post("/")
@@ -307,13 +311,51 @@ async def create_service_request_stream(request: ServiceRequest):
             provider_count = len(final_state.get("providers", []))
             yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'provider_discovery', 'message': f'{provider_count} providers found nearby'})}\n\n"
 
-            # ── 5. Ranking → two step_completes ──────────────────────────────
+            # ── 5. Ranking ────────────────────────────────────────────────────
             yield f"data: {json.dumps({'event': 'step_start', 'stage': 'provider_ranking'})}\n\n"
             ranking_result = await ranking_node(final_state)
             final_state   = {**final_state, **ranking_result}
+            yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'provider_ranking', 'message': 'Providers ranked by rating and distance'})}\n\n"
+
+            # ── 5b. Stream shortlist → wait for user selection ────────────────
+            top_providers = final_state.get("top_providers", [])
+            if top_providers:
+                shortlist_payload = []
+                for entry in top_providers:
+                    p = entry.get("provider", {})
+                    shortlist_payload.append({
+                        "id":               p.get("id", ""),
+                        "name":             p.get("name", ""),
+                        "service_type":     final_state.get("intent").value if final_state.get("intent") else "",
+                        "rating":           p.get("rating", 0),
+                        "distance_km":      p.get("distance_km", 0),
+                        "price_per_hour":   p.get("price_per_hour", 0),
+                        "experience_years": p.get("experience_years", 0),
+                        "score":            entry.get("score", 0),
+                        "reasoning":        entry.get("reasoning", ""),
+                    })
+                yield f"data: {json.dumps({'event': 'provider_shortlist', 'request_id': request_id, 'providers': shortlist_payload})}\n\n"
+
+                sel_event = asyncio.Event()
+                _pending_selections[request_id] = sel_event
+                chosen_id = None
+                try:
+                    await asyncio.wait_for(sel_event.wait(), timeout=120.0)
+                    chosen_id = _selection_results.pop(request_id, None)
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    _pending_selections.pop(request_id, None)
+
+                if chosen_id:
+                    chosen_provider = next(
+                        (p for p in final_state.get("providers", []) if p.get("id") == chosen_id),
+                        final_state.get("selected_provider"),
+                    )
+                    final_state = {**final_state, "selected_provider": chosen_provider}
+
             selected      = final_state.get("selected_provider")
             selected_name = selected.get("name") if selected else "None available"
-            yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'provider_ranking',   'message': 'Providers ranked by rating and distance'})}\n\n"
             yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'provider_selection', 'message': f'Selected: {selected_name}'})}\n\n"
 
             # ── 6. Booking ────────────────────────────────────────────────────
@@ -395,6 +437,17 @@ async def create_service_request_stream(request: ServiceRequest):
             "Connection": "keep-alive",
         },
     )
+
+
+@router.post("/{request_id}/select")
+async def select_provider(request_id: str, body: ProviderSelectionBody):
+    """Called by the mobile client to choose a provider from the shortlist."""
+    event = _pending_selections.get(request_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="No pending provider selection for this request")
+    _selection_results[request_id] = body.provider_id
+    event.set()
+    return api_response(success=True, message="Provider selected successfully")
 
 
 @router.post("/{request_id}/cancel")

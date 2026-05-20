@@ -35,6 +35,7 @@ def _provider_to_dict(p):
         "price_per_hour": p.price_per_hour,
         "experience_years": p.experience_years,
         "availability": p.availability,
+        "range_km": getattr(p, "range_km", 10.0),
         "location": {"address": p.location.address, "lat": p.location.lat, "lng": p.location.lng},
     }
 
@@ -109,6 +110,16 @@ async def get_all_providers():
 async def create_provider(body: ProviderCreate):
     import uuid
     new_id = f"p-{uuid.uuid4().hex[:8]}"
+    
+    # Geocode if lat/lng are missing/0.0
+    lat = body.location.lat
+    lng = body.location.lng
+    if lat is None or lng is None or (lat == 0.0 and lng == 0.0):
+        from tools.maps_tool import maps_tool
+        coords = maps_tool.geocode(body.location.address)
+        body.location.lat = coords.get("lat", 24.8607)
+        body.location.lng = coords.get("lng", 67.0011)
+
     provider = Provider(
         id=new_id,
         name=body.name,
@@ -119,6 +130,7 @@ async def create_provider(body: ProviderCreate):
         price_per_hour=body.price_per_hour,
         experience_years=body.experience_years,
         availability=body.availability,
+        range_km=body.range_km,
     )
     db_service.create_provider(provider)
     return api_response(success=True, message="Provider created", data=_provider_to_dict(provider))
@@ -129,6 +141,16 @@ async def update_provider(provider_id: str, body: ProviderCreate):
     existing = db_service.get_provider_by_id(provider_id)
     if not existing:
         raise HTTPException(status_code=404, detail=f"Provider {provider_id} not found")
+    
+    # Geocode if lat/lng are missing/0.0
+    lat = body.location.lat
+    lng = body.location.lng
+    if lat is None or lng is None or (lat == 0.0 and lng == 0.0):
+        from tools.maps_tool import maps_tool
+        coords = maps_tool.geocode(body.location.address)
+        body.location.lat = coords.get("lat", 24.8607)
+        body.location.lng = coords.get("lng", 67.0011)
+
     updated = Provider(
         id=provider_id,
         name=body.name,
@@ -139,6 +161,7 @@ async def update_provider(provider_id: str, body: ProviderCreate):
         price_per_hour=body.price_per_hour,
         experience_years=body.experience_years,
         availability=body.availability,
+        range_km=body.range_km,
     )
     db_service.update_provider(provider_id, updated)
     return api_response(success=True, message="Provider updated", data=_provider_to_dict(updated))

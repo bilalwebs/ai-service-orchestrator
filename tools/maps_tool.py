@@ -45,8 +45,13 @@ class MapsTool:
     def geocode(self, address: str):
         """Convert address to lat/lng using Google Maps or a fallback."""
         if not self.gmaps:
-            logger.warning(f"Geocoding '{address}' using fallback coordinates (Karachi).")
-            # Default to Karachi coordinates for testing
+            logger.warning(f"Geocoding '{address}' using fallback coordinates.")
+            # Smarter fallback based on address details
+            addr_lower = address.lower()
+            if any(kw in addr_lower for kw in ["islamabad", "g-13", "g-14", "f-11", "f-6", "g-11"]):
+                return {"lat": 33.6844, "lng": 73.0479}
+            elif any(kw in addr_lower for kw in ["lahore", "gulberg", "johar town", "model town"]):
+                return {"lat": 31.5204, "lng": 74.3587}
             return {"lat": 24.8607, "lng": 67.0011} 
         
         try:
@@ -56,6 +61,12 @@ class MapsTool:
         except Exception as e:
             logger.error(f"Geocoding error: {str(e)}")
             
+        # Smarter fallback here as well in case of API failure
+        addr_lower = address.lower()
+        if any(kw in addr_lower for kw in ["islamabad", "g-13", "g-14", "f-11", "f-6", "g-11"]):
+            return {"lat": 33.6844, "lng": 73.0479}
+        elif any(kw in addr_lower for kw in ["lahore", "gulberg", "johar town", "model town"]):
+            return {"lat": 31.5204, "lng": 74.3587}
         return {"lat": 24.8607, "lng": 67.0011} 
 
 maps_tool = MapsTool()

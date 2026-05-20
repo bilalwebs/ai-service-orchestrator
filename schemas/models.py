@@ -33,8 +33,8 @@ class BookingStatus(str, Enum):
 class Location(BaseModel):
     """User location details"""
     address: str = Field(..., description="Full address of the user")
-    lat: float = Field(..., ge=-90, le=90, description="Latitude")
-    lng: float = Field(..., ge=-180, le=180, description="Longitude")
+    lat: Optional[float] = Field(default=None, ge=-90, le=90, description="Latitude")
+    lng: Optional[float] = Field(default=None, ge=-180, le=180, description="Longitude")
 
 
 class ServiceRequest(BaseModel):
@@ -63,6 +63,7 @@ class Provider(BaseModel):
     price_per_hour: float = Field(..., gt=0)
     experience_years: int = Field(..., ge=0)
     availability: bool = True
+    range_km: float = Field(default=10.0, gt=0, description="Max travel distance for this provider in km")
 
 
 class Booking(BaseModel):
@@ -91,6 +92,12 @@ class ProviderCreate(BaseModel):
     price_per_hour: float = Field(..., gt=0)
     experience_years: int = Field(..., ge=0)
     availability: bool = True
+    range_km: float = Field(default=10.0, gt=0, description="Max travel distance in km")
+
+
+class ProviderSelectionBody(BaseModel):
+    """Request body for selecting a provider from the shortlist"""
+    provider_id: str
 
 
 class AdminRequestLog(BaseModel):

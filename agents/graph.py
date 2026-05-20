@@ -234,7 +234,8 @@ async def provider_discovery_node(state: AgentState):
             skipped_unavailable.append(p.name)
             continue
         dist = maps_tool.get_distance(user_loc.lat, user_loc.lng, p.location.lat, p.location.lng)
-        if dist > MAX_DISTANCE_KM:
+        effective_range = min(p.range_km, MAX_DISTANCE_KM)
+        if dist > effective_range:
             skipped_distant.append((p.name, round(dist, 2)))
             continue
         p_dict = p.model_dump()  # ✅ model_dump() not .dict()
@@ -242,9 +243,9 @@ async def provider_discovery_node(state: AgentState):
         providers_with_distance.append(p_dict)
 
     discovery_msg = (
-        f"Found {len(providers_with_distance)} providers within {MAX_DISTANCE_KM}km."
+        f"Found {len(providers_with_distance)} providers within range."
         if providers_with_distance
-        else f"No providers within {MAX_DISTANCE_KM}km for {intent.value}."
+        else f"No providers within range for {intent.value}."
     )
     logger.info(f"Discovery: {len(providers_with_distance)} providers found")
 

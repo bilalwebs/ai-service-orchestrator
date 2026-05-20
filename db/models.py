@@ -31,6 +31,7 @@ class Provider(Base):
     price_per_hour = Column(Float)
     experience_years = Column(Integer)
     availability = Column(Boolean, default=True)
+    range_km = Column(Float, default=10.0)
 
     bookings = relationship("Booking", back_populates="provider")
 
