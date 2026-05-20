@@ -30,12 +30,12 @@ logger = logging.getLogger(__name__)
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "ollama").lower()
 
 if MODEL_PROVIDER == "gemini":
-    google_api_key = os.getenv("GOOGLE_API_KEY")
-    if not google_api_key or google_api_key == "your_api_key_here":
-        logger.warning("GOOGLE_API_KEY is not set or placeholder. Falling back to rule-based parser in graph.")
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_api_key or gemini_api_key == "your_api_key_here":
+        logger.warning("GEMINI_API_KEY is not set or placeholder. Falling back to rule-based parser in graph.")
     llm = ChatGoogleGenerativeAI(
         model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
-        google_api_key=google_api_key,
+        google_api_key=gemini_api_key,
         temperature=0.1,
     )
 else:
