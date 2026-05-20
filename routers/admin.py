@@ -1,9 +1,10 @@
 from datetime import datetime
 from typing import List
 from fastapi import APIRouter, HTTPException
-from db.mock_db import db
+from tools.database_service import db_service
 from schemas.models import Provider, ServiceType, Location, ProviderCreate
 from utils.request_id import generate_request_id
+from schemas.response import api_response
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -57,43 +58,46 @@ def _log_to_dict(log):
 
 @router.get("/bookings/")
 async def get_all_bookings():
-    return [_booking_to_dict(b) for b in db.get_all_bookings()]
+    data = [_booking_to_dict(b) for b in db_service.get_all_bookings()]
+    return api_response(success=True, message="Admin bookings retrieved", data=data)
 
 
 @router.get("/bookings/{booking_id}")
 async def get_booking(booking_id: str):
-    booking = db.get_booking_by_id(booking_id)
+    booking = db_service.get_booking_by_id(booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail=f"Booking {booking_id} not found")
-    return _booking_to_dict(booking)
+    return api_response(success=True, message="Admin booking retrieved", data=_booking_to_dict(booking))
 
 
 @router.post("/bookings/{booking_id}/complete")
 async def complete_booking(booking_id: str):
-    booking = db.complete_booking_admin(booking_id)
+    booking = db_service.complete_booking_admin(booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail=f"Booking {booking_id} not found")
-    return _booking_to_dict(booking)
+    return api_response(success=True, message="Booking completed", data=_booking_to_dict(booking))
 
 
 @router.post("/bookings/{booking_id}/cancel")
 async def cancel_booking(booking_id: str):
-    booking = db.cancel_booking(booking_id)
+    booking = db_service.cancel_booking(booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail=f"Booking {booking_id} not found")
-    return _booking_to_dict(booking)
+    return api_response(success=True, message="Booking cancelled", data=_booking_to_dict(booking))
 
 
 # ── Providers ─────────────────────────────────────────────────────────────────
 
 @router.get("/providers/")
 async def get_all_providers():
-    return [_provider_to_dict(p) for p in db.providers.values()]
+    data = [_provider_to_dict(p) for p in db_service.get_all_providers()]
+    return api_response(success=True, message="Admin providers retrieved", data=data)
 
 
 @router.post("/providers/")
 async def create_provider(body: ProviderCreate):
-    new_id = f"p{len(db.providers) + 1:03d}"
+    import uuid
+    new_id = f"p-{uuid.uuid4().hex[:8]}"
     provider = Provider(
         id=new_id,
         name=body.name,
@@ -105,13 +109,13 @@ async def create_provider(body: ProviderCreate):
         experience_years=body.experience_years,
         availability=body.availability,
     )
-    db.create_provider(provider)
-    return _provider_to_dict(provider)
+    db_service.create_provider(provider)
+    return api_response(success=True, message="Provider created", data=_provider_to_dict(provider))
 
 
 @router.put("/providers/{provider_id}")
 async def update_provider(provider_id: str, body: ProviderCreate):
-    existing = db.get_provider_by_id(provider_id)
+    existing = db_service.get_provider_by_id(provider_id)
     if not existing:
         raise HTTPException(status_code=404, detail=f"Provider {provider_id} not found")
     updated = Provider(
@@ -125,36 +129,37 @@ async def update_provider(provider_id: str, body: ProviderCreate):
         experience_years=body.experience_years,
         availability=body.availability,
     )
-    db.update_provider(provider_id, updated)
-    return _provider_to_dict(updated)
+    db_service.update_provider(provider_id, updated)
+    return api_response(success=True, message="Provider updated", data=_provider_to_dict(updated))
 
 
 @router.delete("/providers/{provider_id}")
 async def delete_provider(provider_id: str):
-    success = db.delete_provider(provider_id)
+    success = db_service.delete_provider(provider_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Provider {provider_id} not found")
-    return {"success": True, "message": f"Provider {provider_id} deleted"}
+    return api_response(success=True, message=f"Provider {provider_id} deleted")
 
 
 @router.patch("/providers/{provider_id}/availability")
 async def toggle_availability(provider_id: str):
-    provider = db.toggle_provider_availability(provider_id)
+    provider = db_service.toggle_provider_availability(provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail=f"Provider {provider_id} not found")
-    return _provider_to_dict(provider)
+    return api_response(success=True, message="Provider availability toggled", data=_provider_to_dict(provider))
 
 
 # ── Requests ─────────────────────────────────────────────────────────────────
 
 @router.get("/requests/")
 async def get_all_requests():
-    return [_log_to_dict(log) for log in db.get_all_request_logs()]
+    data = [_log_to_dict(log) for log in db_service.get_all_request_logs()]
+    return api_response(success=True, message="Admin requests retrieved", data=data)
 
 
 @router.get("/requests/{request_id}")
 async def get_request(request_id: str):
-    log = db.get_request_log_by_id(request_id)
+    log = db_service.get_request_log_by_id(request_id)
     if not log:
         raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
-    return _log_to_dict(log)
+    return api_response(success=True, message="Admin request log retrieved", data=_log_to_dict(log))

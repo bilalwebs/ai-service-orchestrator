@@ -159,7 +159,9 @@ load_dotenv()
 from agents.graph import app_graph
 from schemas.models import ServiceRequest, Location, UrgencyLevel
 
-def run_test_case(title, query, location_name, lat, lng, urgency=UrgencyLevel.MEDIUM):
+import asyncio
+
+async def run_test_case(title, query, location_name, lat, lng, urgency=UrgencyLevel.MEDIUM):
     print("\n" + "="*90)
     print(f"🚀 TEST CASE: {title}")
     print(f"💬 Query: \"{query}\"")
@@ -188,7 +190,7 @@ def run_test_case(title, query, location_name, lat, lng, urgency=UrgencyLevel.ME
     }
 
     try:
-        result = app_graph.invoke(initial_state)
+        result = await app_graph.ainvoke(initial_state)
         
         print("\n📜 AGENT TRACE:")
         for step in result.get("trace", []):
@@ -249,6 +251,9 @@ if __name__ == "__main__":
          "F-6, Islamabad", 33.7297, 73.0747),
     ]
 
-    for title, query, loc, lat, lng in test_cases:
-        run_test_case(title, query, loc, lat, lng)
-        print("\n" + "*" * 90)
+    async def main():
+        for title, query, loc, lat, lng in test_cases:
+            await run_test_case(title, query, loc, lat, lng)
+            print("\n" + "*" * 90)
+    
+    asyncio.run(main())

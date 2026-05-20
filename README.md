@@ -1,150 +1,152 @@
-# 🛠️ Antigravity Service Orchestrator
-### AI-Powered Orchestration for Pakistan's Informal Economy
+# Challenge 2: AI Service Orchestrator for Informal Economy
 
-[![Google Antigravity](https://img.shields.io/badge/Hackathon-Google%20Antigravity-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://google.com)
-[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![LangGraph](https://img.shields.io/badge/Framework-LangGraph-FF6F00?style=for-the-badge)](https://langchain-ai.github.io/langgraph/)
+An advanced, multi-agent AI orchestration system built to automate the end-to-end lifecycle of informal service requests. This solution addresses the inefficiencies of the informal economy (WhatsApp messages, phone calls, informal referrals) by deploying an **Agentic AI System** powered by **Google Antigravity**, **FastAPI**, and **LangGraph**.
 
-## 📖 Overview
-The **Antigravity Service Orchestrator** is a sophisticated multi-agent system designed to bridge the gap between informal service providers (AC technicians, plumbers, electricians, etc.) and customers in Pakistan. 
+---
 
-It handles complex natural language queries (English, Urdu, and Roman Urdu), discovers the best-verified providers based on location and rating, and automates the booking process—all while providing a transparent, step-by-step "Agent Trace" for the user.
+## 1. Challenge Overview & Problem Statement
 
-## ✨ Key Features
-- **Trilingual Support**: Expertly parses English, Urdu, and Roman Urdu (e.g., *"AC thanda nahi kar raha"*).
-- **Intelligent Discovery**: Real-time provider lookup with distance calculation via Google Maps-style logic.
-- **Multi-Criteria Ranking**: Ranks providers based on a weighted score of Rating, Distance, and Experience, adjusted by request urgency.
-- **Transparent Reasoning**: Explains *why* a specific provider was chosen.
-- **Detailed Agent Trace**: Judges and developers can see exactly how the AI moved from Intent → Discovery → Ranking → Booking.
-- **Structured Output**: Clean, professional responses with clear booking and provider details.
+The informal economy—plumbers, electricians, tutors, beauticians—operates without automation, resulting in inefficient matching and poor user experiences. Users struggle to find reliable, real-time availability.
 
-## 🏗️ Project Architecture
+**Our Solution:**
+An end-to-end AI orchestrator that:
+1. **Understands** user requests in natural language (Urdu, Roman Urdu, English).
+2. **Identifies** relevant providers using location and context.
+3. **Selects** and ranks the best providers based on distance, rating, and availability.
+4. **Simulates** realistic booking and confirmation flows.
+5. **Handles** automated follow-up interactions (reminders/status updates).
+6. **Maintains** transparent, traceable reasoning logs via the agent workflow.
 
-```mermaid
-graph TD
-    A[User Query] --> B(Intent Parser Node)
-    B -->|Extract Service, Lang, Urgency| C(Provider Discovery Node)
-    C -->|Query DB + Distance Calc| D(Ranking Node)
-    D -->|Score: Rating + Dist + Exp| E(Booking Node)
-    E -->|Confirm & Save| F(Follow-up Node)
-    F --> G[Final Structured Output]
-    
-    subgraph "Antigravity Multi-Agent Graph"
-    B
-    C
-    D
-    E
-    F
-    end
-    
-    subgraph "External Tools"
-    T1[DB Tool]
-    T2[Maps Tool]
-    T3[Gemini 2.0 Flash]
-    end
-    
-    B --- T3
-    C --- T1
-    C --- T2
-    E --- T1
+### Mandatory Requirement: Google Antigravity
+This system leverages **Google Antigravity** as the central orchestration platform. Antigravity manages the multi-step reasoning pipelines, seamlessly integrates our external APIs (Maps, DB), and oversees the autonomous execution of booking and notification tasks.
+
+---
+
+## 2. System Architecture & Agentic Workflow
+
+The backend follows a clean, modular, domain-driven architecture demonstrating strong autonomy and reasoning.
+
+```text
+[ Client Application ] (Web / Mobile)
+    │
+    ▼
+[ FastAPI Routers ] (REST / SSE Endpoints, Input Validation)
+    │
+    ▼
+[ Google Antigravity + LangGraph ] (Multi-agent AI Orchestration)
+    │
+    ├──> 1. Intent Parser Agent (NLP, Language Detection, Urgency)
+    ├──> 2. Provider Discovery Agent (Geo-spatial DB & Maps logic)
+    ├──> 3. Ranking Agent (Multi-variable scoring & selection)
+    ├──> 4. Booking Execution Agent (Transaction Simulation)
+    └──> 5. Follow-Up Agent (Reminders & Confirmations)
+    │
+    ▼
+[ Tools & Repositories ] (DB Abstraction, Provider / Booking Logic)
+    │
+    ▼
+[ Database Layer ] (Mock In-Memory DB OR SQLite)
 ```
 
-## 🚀 Setup & Run
+### The AI Workflow (Step-by-step)
+When a user submits a raw request (e.g., *"Mujhe kal subah G-13 mein AC technician chahiye"*):
+
+1. **Intent Understanding**: Antigravity orchestrates the parser to extract the service type (`ac_technician`), location (`G-13`), and time (`Tomorrow morning`).
+2. **Provider Discovery**: The system queries the database/mock data for available technicians within the requested radius.
+3. **Matching & Ranking**: Discovered providers are ranked based on rating, distance, experience, and the user's urgency. Clear reasoning is generated (e.g., *Closest available provider with high rating*).
+4. **Action Simulation**: A slot is automatically reserved (e.g., *10:00 AM*), updating the database state and generating a confirmation.
+5. **Follow-Up Automation**: The AI schedules reminders (e.g., *1 hour before appointment*) and provides the user with clear next steps.
+6. **Delivery**: The FastAPI router wraps the final result in a standardized JSON payload or streams the agent's thought process live via SSE.
+
+---
+
+## 3. Installation & Setup
 
 ### Prerequisites
 - Python 3.10+
-- Google Gemini API Key
+- SQLite (For persistent database mode)
 
-### Installation
-1. Clone the repository:
+### Setup Commands
+
+1. **Clone the repository**
    ```bash
-   git clone <repo-url>
+   git clone <repository_url>
    cd informal-service-orchestrator
    ```
 
-2. Create and activate a virtual environment:
+2. **Create and activate a virtual environment**
    ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   python -m venv venv
+   source venv/bin/activate  # On Windows use: venv\Scripts\activate
    ```
 
-3. Install dependencies:
+3. **Install dependencies**
    ```bash
    pip install -r requirements.txt
    ```
 
-4. Configure environment variables:
-   Create a `.env` file in the root:
+4. **Setup Environment Variables**
+   Create a `.env` file in the root directory:
    ```env
-   GOOGLE_API_KEY=your_gemini_api_key_here
-   PORT=8000
+   # .env
+   USE_REAL_DB=false
+   DATABASE_URL=sqlite:///./informal_services.db
+   WORKFLOW_TIMEOUT_SECONDS=60
+   ALLOWED_ORIGINS=*
    ```
 
-### Running the System
-**Option 1: Terminal Test Suite (Recommended for Judges)**
-Run the full workflow demo with multiple test cases:
-```bash
-python test_flow.py
-```
-
-**Option 2: FastAPI Server**
-Start the API:
-```bash
-python main.py
-```
-Access docs at: `http://localhost:8000/docs`
-
-## 📡 API Examples
-
-### Create Service Request
-**POST** `/requests/`
-```json
-{
-  "user_id": "user_99",
-  "raw_query": "Kitchen ka sink leak ho raha hai, emergency hai!",
-  "location": {
-    "address": "North Nazimabad, Karachi",
-    "lat": 24.9333,
-    "lng": 67.0333
-  },
-  "urgency": "high"
-}
-```
-
-### Sample Response
-```json
-{
-  "status": "success",
-  "detected_intent": "plumber",
-  "final_output": {
-    "success": true,
-    "message": "Behtreen! Waseem Akram aap ke kaam ke liye confirm ho gaye hain...",
-    "booking_details": {
-      "booking_id": "BK-1715794285",
-      "status": "confirmed",
-      "total_estimated_cost": "PKR 2000.0/hr"
-    },
-    "provider_details": {
-      "name": "Waseem Akram",
-      "rating": 4.9,
-      "distance": "0.5 km"
-    },
-    "reasoning_summary": "Chosen Waseem Akram because they have a 4.9 star rating..."
-  }
-}
-```
-
-## 🌌 How We Used Google Antigravity
-This project leverages **Google Gemini 2.0 Flash** and **LangGraph** to create a reliable service orchestration layer:
-1. **Orchestration**: We used a state-based graph to ensure the agent follows a strict, predictable path while remaining flexible in natural language understanding.
-2. **Tools**: Custom tools were built for Database interaction and Mock Maps calculation, simulating a real-world production environment.
-3. **Traceability**: Every node execution is logged into a `trace` field, allowing for high-quality debugging and judge verification of the AI's internal logic.
-4. **Resilience**: The system uses structured JSON extraction with re-try logic to ensure the LLM output is always usable by the backend.
-
-## 👥 Team Contribution
-- **AI Orchestration**: Built the multi-agent graph logic using LangGraph and Gemini.
-- **Backend Infrastructure**: FastAPI setup, Pydantic modeling, and mock database integration.
-- **Frontend/API Design**: Structured response formatting and Roman Urdu localization.
+5. **Run the server**
+   ```bash
+   uvicorn main:app --reload
+   ```
 
 ---
-*Built for the Google Antigravity Hackathon Challenge 2.*
+
+## 4. API Endpoints & Integration
+
+The system adheres to a strict, frontend-friendly JSON contract (`{ success, message, data, error }`).
+
+- **`GET /`** : Health check and system status.
+- **`GET /services/`** : Fetch the catalog of service categories.
+- **`GET /services/providers`** : Fetch mock provider datasets.
+- **`POST /requests/`** : Submit natural language requests for AI processing.
+- **`POST /requests/stream`** : **[CRITICAL]** Submit requests and receive live SSE streams of the AI's step-by-step reasoning and state changes.
+- **`GET /bookings/user/{user_id}`** : Track simulated booking history.
+- **`POST /bookings/{id}/complete`** : Simulate the completion of a service.
+
+---
+
+## 5. Streaming (SSE) & Traceability
+
+A key component of this hackathon submission is the **Agent Trace / Logs**. 
+
+Using the `/requests/stream` endpoint, the system streams the AI's internal thought process live to the client using **Server-Sent Events (SSE)**.
+- It provides a granular, real-time look into Antigravity's orchestration.
+- Shows exactly how the NLP parsing, search limits, and ranking algorithms function in real-time before finalizing the booking.
+- Includes transparent logs of decisions, tool usage, and action execution.
+
+---
+
+## 6. Database Modes & Action Simulation
+
+Action simulation is a core requirement of this challenge. Our system maintains state changes through a flexible database layer controlled by the `USE_REAL_DB` environment variable.
+
+### MockDB (Development & Simulation)
+- **`USE_REAL_DB=false`**
+- Uses a robust, in-memory Python dictionary store heavily populated with localized dummy data.
+- Perfect for demonstrating the booking simulation, scheduling, and provider assignment rapidly without external dependencies.
+
+### SQLite (Persistent SQL Database)
+- **`USE_REAL_DB=true`**
+- Uses SQLAlchemy 2.0 with SQLite for persistent local tracking of bookings, users, and provider availability without any database setup overhead.
+
+---
+
+## 7. Evaluation Criteria Alignment
+
+1. **Use of Google Antigravity (25%)**: Antigravity serves as the core orchestration engine managing the LangGraph nodes, routing multi-step logic, and handling tools.
+2. **Agentic Reasoning (20%)**: Employs a strict pipeline from intent parsing → discovery → ranking → execution → follow-up.
+3. **Matching Quality (20%)**: Implements multi-variable weighted ranking (Distance, Rating, Experience) tailored to the urgency of the user's request.
+4. **Action Simulation (15%)**: Realistically simulates end-to-end booking, maintaining database state, and handling localized follow-ups.
+5. **Technical Implementation (10%)**: Clean, modular API design with safe streaming, standardized responses, and dual DB support.
+6. **Innovation & UX (10%)**: Handles mixed Roman Urdu/English seamlessly, returning localized and actionable next steps.
