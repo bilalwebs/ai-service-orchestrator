@@ -86,9 +86,50 @@ class MockDB:
                 phone="+923001112223", price_per_hour=3000.0, experience_years=7
             ),
             "p17": Provider(
-                id="p17", name="Sara Khan", service_type=ServiceType.BEAUTICIAN, 
+                id="p17", name="Sara Khan", service_type=ServiceType.BEAUTICIAN,
                 rating=4.6, location=Location(address="Gulshan-e-Iqbal, Karachi", lat=24.9167, lng=67.0833),
                 phone="+923212223334", price_per_hour=2500.0, experience_years=5
+            ),
+            # ── Islamabad-area providers (near default coords 33.6333, 72.9667) ──
+            "p18": Provider(
+                id="p18", name="Aslam Electric Works", service_type=ServiceType.ELECTRICIAN,
+                rating=4.8, location=Location(address="G-13/3, Islamabad", lat=33.6380, lng=72.9720),
+                phone="+923001234580", price_per_hour=1300.0, experience_years=10
+            ),
+            "p19": Provider(
+                id="p19", name="Naeem Electric Services", service_type=ServiceType.ELECTRICIAN,
+                rating=4.5, location=Location(address="G-14, Islamabad", lat=33.6510, lng=72.9830),
+                phone="+923001234581", price_per_hour=1100.0, experience_years=7
+            ),
+            "p20": Provider(
+                id="p20", name="Bilal Painters", service_type=ServiceType.PAINTER,
+                rating=4.6, location=Location(address="G-10, Islamabad", lat=33.6600, lng=72.9960),
+                phone="+923001234582", price_per_hour=950.0, experience_years=8
+            ),
+            "p21": Provider(
+                id="p21", name="Aqsa Beauty Salon", service_type=ServiceType.BEAUTICIAN,
+                rating=4.9, location=Location(address="G-13/2, Islamabad", lat=33.6355, lng=72.9680),
+                phone="+923001234583", price_per_hour=2800.0, experience_years=6
+            ),
+            "p22": Provider(
+                id="p22", name="Tariq AC Repair", service_type=ServiceType.AC_TECHNICIAN,
+                rating=4.7, location=Location(address="G-14/4, Islamabad", lat=33.6470, lng=72.9760),
+                phone="+923001234584", price_per_hour=1700.0, experience_years=9
+            ),
+            "p23": Provider(
+                id="p23", name="Hassan Plumbing", service_type=ServiceType.PLUMBER,
+                rating=4.6, location=Location(address="G-13/1, Islamabad", lat=33.6340, lng=72.9690),
+                phone="+923001234585", price_per_hour=1100.0, experience_years=6
+            ),
+            "p24": Provider(
+                id="p24", name="Clean Home Services", service_type=ServiceType.CLEANER,
+                rating=4.5, location=Location(address="G-13/4, Islamabad", lat=33.6360, lng=72.9710),
+                phone="+923001234586", price_per_hour=700.0, experience_years=4
+            ),
+            "p25": Provider(
+                id="p25", name="Ustad Tutor Academy", service_type=ServiceType.TUTOR,
+                rating=4.9, location=Location(address="G-13, Islamabad", lat=33.6345, lng=72.9675),
+                phone="+923001234587", price_per_hour=2000.0, experience_years=8
             ),
         }
         self.bookings: List[Booking] = []
@@ -112,6 +153,10 @@ class MockDB:
         return self.bookings
 
     def log_request(self, entry: AdminRequestLog):
+        for idx, log in enumerate(self.request_logs):
+            if log.id == entry.id:
+                self.request_logs[idx] = entry
+                return
         self.request_logs.append(entry)
 
     def get_all_request_logs(self) -> List[AdminRequestLog]:

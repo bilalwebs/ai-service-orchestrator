@@ -16,3 +16,4 @@ passlib
 python-jose[cryptography]
 python-multipart
 dotenv
+langchain-ollama

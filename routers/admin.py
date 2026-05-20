@@ -39,7 +39,18 @@ def _provider_to_dict(p):
     }
 
 
+def _normalize_trace_item(t: dict) -> dict:
+    """Normalize trace items for clients.
+    Old DB entries used step_name/description; current entries use stage/message."""
+    return {
+        "stage":   t.get("stage")   or t.get("step_name") or "unknown",
+        "message": t.get("message") or t.get("description") or "",
+        "status":  t.get("status")  or "unknown",
+    }
+
+
 def _log_to_dict(log):
+    raw_trace = log.trace if isinstance(log.trace, list) else []
     return {
         "id": log.id,
         "user_id": log.user_id,
@@ -49,7 +60,7 @@ def _log_to_dict(log):
         "language": log.language,
         "status": log.status,
         "booking_id": log.booking_id,
-        "trace": log.trace,
+        "trace": [_normalize_trace_item(t) for t in raw_trace if isinstance(t, dict)],
         "created_at": log.created_at,
     }
 

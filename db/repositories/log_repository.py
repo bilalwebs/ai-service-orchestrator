@@ -13,20 +13,31 @@ class LogRepository:
         self._db = session
 
     def log_request(self, entry: AdminRequestLogSchema) -> None:
-        row = models.AdminRequestLog(
-            id=entry.id,
-            user_id=entry.user_id,
-            raw_query=entry.raw_query,
-            urgency=entry.urgency,
-            intent=entry.intent,
-            language=entry.language,
-            status=entry.status,
-            booking_id=entry.booking_id,
-            trace=entry.trace,
-            created_at=entry.created_at,
-        )
-        try:
+        existing = self._db.get(models.AdminRequestLog, entry.id)
+        if existing:
+            existing.user_id = entry.user_id
+            existing.raw_query = entry.raw_query
+            existing.urgency = entry.urgency
+            existing.intent = entry.intent
+            existing.language = entry.language
+            existing.status = entry.status
+            existing.booking_id = entry.booking_id
+            existing.trace = entry.trace
+        else:
+            row = models.AdminRequestLog(
+                id=entry.id,
+                user_id=entry.user_id,
+                raw_query=entry.raw_query,
+                urgency=entry.urgency,
+                intent=entry.intent,
+                language=entry.language,
+                status=entry.status,
+                booking_id=entry.booking_id,
+                trace=entry.trace,
+                created_at=entry.created_at,
+            )
             self._db.add(row)
+        try:
             self._db.commit()
         except Exception:
             self._db.rollback()

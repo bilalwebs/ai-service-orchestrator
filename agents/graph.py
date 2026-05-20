@@ -23,11 +23,31 @@ from config import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
-    google_api_key=os.getenv("GOOGLE_API_KEY"),
-    temperature=0.1,
-)
+# -------------------------------------------------------------------
+# Model selection (ollama or gemini)
+# Default is 'ollama' as requested by the user
+# -------------------------------------------------------------------
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "ollama").lower()
+
+if MODEL_PROVIDER == "gemini":
+    google_api_key = os.getenv("GOOGLE_API_KEY")
+    if not google_api_key or google_api_key == "your_api_key_here":
+        logger.warning("GOOGLE_API_KEY is not set or placeholder. Falling back to rule-based parser in graph.")
+    llm = ChatGoogleGenerativeAI(
+        model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        google_api_key=google_api_key,
+        temperature=0.1,
+    )
+else:
+    from langchain_ollama import ChatOllama
+    ollama_model = os.getenv("OLLAMA_MODEL", "llama3")
+    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    logger.info(f"Using Ollama LLM provider with model: {ollama_model} on {ollama_base_url}")
+    llm = ChatOllama(
+        model=ollama_model,
+        temperature=0.1,
+        base_url=ollama_base_url,
+    )
 
 
 def _make_trace(step_name: str, agent_name: str, description: str, input_data: Any,
@@ -35,8 +55,10 @@ def _make_trace(step_name: str, agent_name: str, description: str, input_data: A
                 request_id: str) -> dict:
     return {
         "step_name": step_name,
+        "stage": step_name,
         "agent_name": agent_name,
         "description": description,
+        "message": description,
         "input": input_data,
         "output": output_data,
         "reasoning": reasoning,
@@ -103,7 +125,7 @@ def rule_based_fallback(query: str):
 
 
 async def intent_parser_node(state: AgentState):
-    """[NODE 1] Intent Parser — Gemini 2.0 Flash + rule-based fallback."""
+    """[NODE 1] Intent Parser — Switchable LLM + rule-based fallback."""
     request_id = state.get("request_id", "")
     query = state["request"].raw_query
 
@@ -139,12 +161,13 @@ urgency values: low | medium | high | emergency
         if not match:
             raise ValueError("No JSON object found in LLM response")
         data = json.loads(match.group())
-        source      = "Gemini LLM"
+        source      = f"LLM ({MODEL_PROVIDER.upper()})"
         intent_val  = data.get("intent",   "other")
         lang_val    = data.get("language", "en")
         urgency_val = data.get("urgency",  "medium")
 
-    except Exception:
+    except Exception as e:
+        logger.warning(f"LLM invocation failed: {e}. Falling back to Rule-based parser.")
         source      = "Rule-based Fallback"
         data        = rule_based_fallback(query)
         intent_val  = data["intent"]
@@ -164,9 +187,9 @@ urgency values: low | medium | high | emergency
         agent_name="intent_parser",
         description="Intent parsed successfully",
         input_data={"raw_query": query},
-        output_data={"intent": intent_val, "language": lang_val, "urgency": urgency_val},
-        reasoning=f"Source: {source}. service={intent_val}, language={lang_val}, urgency={urgency_val}",
-        tool_used="Gemini LLM" if source == "Gemini LLM" else "Rule-based",
+        output_data={"intent": intent_obj.value, "language": lang_val, "urgency": urgency_val},
+        reasoning=f"Source: {source}. service={intent_obj.value}, language={lang_val}, urgency={urgency_val}",
+        tool_used=source if source != "Rule-based Fallback" else "Rule-based",
         status="completed",
         request_id=request_id,
     )
