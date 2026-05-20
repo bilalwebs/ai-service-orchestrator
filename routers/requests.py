@@ -1,10 +1,16 @@
 import asyncio
 import json
 from datetime import datetime
+from typing import Dict
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from schemas.models import ServiceRequest, AdminRequestLog
-from agents.graph import app_graph, complete_booking_node, _make_trace
+from schemas.models import ServiceRequest, AdminRequestLog, ProviderSelectionBody
+from agents.graph import (
+    app_graph, complete_booking_node, _make_trace, llm,
+    intent_parser_node, provider_discovery_node,
+    ranking_node, booking_execution_node, followup_node,
+)
+from langchain_core.messages import HumanMessage, SystemMessage
 from tools.database_service import db_service
 from utils.request_id import generate_request_id
 from logs.logger import log_interaction
@@ -15,11 +21,59 @@ router = APIRouter(prefix="/requests", tags=["Service Requests"])
 # Timeout (seconds) for the full LangGraph workflow. Guards against LLM hangs.
 WORKFLOW_TIMEOUT_SECONDS = int(__import__("os").getenv("WORKFLOW_TIMEOUT_SECONDS", "60"))
 
+FIXED_PLAN_STEPS = [
+    {"stage": "intent_detection",       "status": "waiting"},
+    {"stage": "llm_analysis",           "status": "waiting"},
+    {"stage": "service_classification", "status": "waiting"},
+    {"stage": "urgency_classification", "status": "waiting"},
+    {"stage": "provider_discovery",     "status": "waiting"},
+    {"stage": "provider_ranking",       "status": "waiting"},
+    {"stage": "provider_selection",     "status": "waiting"},
+    {"stage": "booking_execution",      "status": "waiting"},
+    {"stage": "followup",               "status": "waiting"},
+]
+
+
+async def _get_plan_message(query: str) -> str:
+    """Quick LLM call: one warm sentence in the same language as the query."""
+    try:
+        response = await asyncio.wait_for(
+            llm.ainvoke([
+                SystemMessage(content=(
+                    "You are an AI assistant for a home services booking app in Pakistan.\n"
+                    "Given a user's service request, write ONE brief sentence (under 15 words) "
+                    "in the SAME language/script as the query.\n"
+                    "Acknowledge warmly and say what you will do. Return ONLY the sentence.\n\n"
+                    "Examples:\n"
+                    "Query: Mujhe kal subah G-13 mein AC technician chahiye\n"
+                    "Response: G-13 mein aap ke liye kal subah AC technician dhundh raha hoon.\n\n"
+                    "Query: I need an electrician urgently\n"
+                    "Response: Finding a certified electrician near you right now.\n\n"
+                    "Query: plumber chahiye leak hai\n"
+                    "Response: Aap ke area mein trusted plumber abhi dhundh raha hoon."
+                )),
+                HumanMessage(content=f"Query: {query}"),
+            ]),
+            timeout=15.0,
+        )
+        return response.content.strip()
+    except Exception:
+        return "Finding the best service provider for you, please wait..."
+
+
+# Global registry to track active asyncio tasks by request_id
+active_tasks: Dict[str, asyncio.Task] = {}
+
+# Provider selection pause mechanism: request_id → asyncio.Event / chosen provider_id
+_pending_selections: Dict[str, asyncio.Event] = {}
+_selection_results: Dict[str, str] = {}
+
 
 @router.post("/")
 async def create_service_request(request: ServiceRequest):
     """Main endpoint — runs the full LangGraph agentic workflow."""
     request_id = generate_request_id()
+    active_tasks[request_id] = asyncio.current_task()
 
     start_user_input = _make_trace(
         step_name="user_input_received",
@@ -89,6 +143,26 @@ async def create_service_request(request: ServiceRequest):
             booking_id=result.get("booking").id if result.get("booking") else None,
             intent=result.get("intent").value if result.get("intent") else None,
         )
+    except asyncio.CancelledError:
+        log_interaction(
+            request_id=request_id,
+            stage="workflow_cancelled",
+            message="LangGraph workflow was cancelled by the user",
+            status="cancelled",
+        )
+        db_service.log_request(AdminRequestLog(
+            id=request_id,
+            user_id=request.user_id,
+            raw_query=request.raw_query,
+            urgency=request.urgency.value,
+            intent=None,
+            language="en",
+            status="cancelled",
+            booking_id=None,
+            trace=initial_state.get("trace", []),
+            created_at=datetime.now().isoformat()
+        ))
+        raise HTTPException(status_code=499, detail="Request cancelled by client")
     except asyncio.TimeoutError:
         log_interaction(
             request_id=request_id,
@@ -109,6 +183,8 @@ async def create_service_request(request: ServiceRequest):
             error=str(e),
         )
         raise HTTPException(status_code=500, detail=f"Workflow execution failed: {str(e)}")
+    finally:
+        active_tasks.pop(request_id, None)
 
     fo      = result.get("final_response") or {}
     booking = result.get("booking")
@@ -204,19 +280,152 @@ async def create_service_request_stream(request: ServiceRequest):
         "final_response": None, "request_id": request_id,
     }
 
-    # FIX 6: Streaming safety — yield typed events, always send [DONE] sentinel,
-    # apply per-chunk timeout so a stalled node does not hang the connection.
     async def event_stream():
+        active_tasks[request_id] = asyncio.current_task()
+        final_state = dict(initial_state)
         try:
-            async for event in app_graph.astream(initial_state, stream_mode="updates"):
-                payload = json.dumps(event, default=custom_json_serializer)
-                yield f"data: {payload}\n\n"
+            # ── 1. Connected immediately ─────────────────────────────────────
+            yield f"data: {json.dumps({'event': 'connected', 'request_id': request_id})}\n\n"
+
+            # ── 2. LLM plan message (15s timeout → fallback) ─────────────────
+            plan_message = await _get_plan_message(request.raw_query)
+            yield f"data: {json.dumps({'event': 'plan', 'message': plan_message, 'steps': FIXED_PLAN_STEPS})}\n\n"
+
+            # ── 3. Intent parsing ─────────────────────────────────────────────
+            yield f"data: {json.dumps({'event': 'step_start', 'stage': 'intent_detection'})}\n\n"
+            intent_result = await intent_parser_node(final_state)
+            final_state = {**final_state, **intent_result}
+            intent_val  = final_state.get("intent")
+            intent_str  = intent_val.value if intent_val else "unknown"
+            lang_str    = final_state.get("language", "en")
+            urgency_str = final_state.get("urgency", "medium")
+            yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'intent_detection',       'message': 'Request understood'})}\n\n"
+            yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'llm_analysis',           'message': f'Language: {lang_str}'})}\n\n"
+            yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'service_classification', 'message': f'Service: {intent_str}'})}\n\n"
+            yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'urgency_classification', 'message': f'Urgency: {urgency_str}'})}\n\n"
+
+            # ── 4. Provider discovery ─────────────────────────────────────────
+            yield f"data: {json.dumps({'event': 'step_start', 'stage': 'provider_discovery'})}\n\n"
+            discovery_result = await provider_discovery_node(final_state)
+            final_state = {**final_state, **discovery_result}
+            provider_count = len(final_state.get("providers", []))
+            yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'provider_discovery', 'message': f'{provider_count} providers found nearby'})}\n\n"
+
+            # ── 5. Ranking ────────────────────────────────────────────────────
+            yield f"data: {json.dumps({'event': 'step_start', 'stage': 'provider_ranking'})}\n\n"
+            ranking_result = await ranking_node(final_state)
+            final_state   = {**final_state, **ranking_result}
+            yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'provider_ranking', 'message': 'Providers ranked by rating and distance'})}\n\n"
+
+            # ── 5b. Stream shortlist → wait for user selection ────────────────
+            top_providers = final_state.get("top_providers", [])
+            if top_providers:
+                shortlist_payload = []
+                for entry in top_providers:
+                    p = entry.get("provider", {})
+                    shortlist_payload.append({
+                        "id":               p.get("id", ""),
+                        "name":             p.get("name", ""),
+                        "service_type":     final_state.get("intent").value if final_state.get("intent") else "",
+                        "rating":           p.get("rating", 0),
+                        "distance_km":      p.get("distance_km", 0),
+                        "price_per_hour":   p.get("price_per_hour", 0),
+                        "experience_years": p.get("experience_years", 0),
+                        "score":            entry.get("score", 0),
+                        "reasoning":        entry.get("reasoning", ""),
+                    })
+                yield f"data: {json.dumps({'event': 'provider_shortlist', 'request_id': request_id, 'providers': shortlist_payload})}\n\n"
+
+                sel_event = asyncio.Event()
+                _pending_selections[request_id] = sel_event
+                chosen_id = None
+                try:
+                    await asyncio.wait_for(sel_event.wait(), timeout=120.0)
+                    chosen_id = _selection_results.pop(request_id, None)
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    _pending_selections.pop(request_id, None)
+
+                if chosen_id:
+                    chosen_provider = next(
+                        (p for p in final_state.get("providers", []) if p.get("id") == chosen_id),
+                        final_state.get("selected_provider"),
+                    )
+                    final_state = {**final_state, "selected_provider": chosen_provider}
+
+            selected      = final_state.get("selected_provider")
+            selected_name = selected.get("name") if selected else "None available"
+            yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'provider_selection', 'message': f'Selected: {selected_name}'})}\n\n"
+
+            # ── 6. Booking ────────────────────────────────────────────────────
+            yield f"data: {json.dumps({'event': 'step_start', 'stage': 'booking_execution'})}\n\n"
+            booking_result = await booking_execution_node(final_state)
+            final_state    = {**final_state, **booking_result}
+            booking        = final_state.get("booking")
+            if booking:
+                slot_str = booking.scheduled_at.strftime("%I:%M %p, %d %b")
+                yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'booking_execution', 'message': f'Slot booked: {slot_str}'})}\n\n"
+                yield f"data: {json.dumps({'event': 'booking_ready', 'booking_id': booking.id})}\n\n"
+            else:
+                yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'booking_execution', 'message': 'No provider available in range'})}\n\n"
+
+            # ── 7. Follow-up ──────────────────────────────────────────────────
+            yield f"data: {json.dumps({'event': 'step_start', 'stage': 'followup'})}\n\n"
+            followup_result = await followup_node(final_state)
+            final_state     = {**final_state, **followup_result}
+            yield f"data: {json.dumps({'event': 'step_complete', 'stage': 'followup', 'message': 'Reminder scheduled 1 hour before appointment'})}\n\n"
+
+            log_interaction(
+                request_id=request_id,
+                stage="workflow_completed",
+                message="Stream workflow completed successfully",
+                status="success",
+                booking_id=booking.id if booking else None,
+                intent=intent_str,
+            )
+
+        except asyncio.CancelledError:
+            log_interaction(
+                request_id=request_id,
+                stage="workflow_cancelled",
+                message="LangGraph stream cancelled by user request",
+                status="cancelled",
+            )
+            db_service.log_request(AdminRequestLog(
+                id=request_id,
+                user_id=request.user_id,
+                raw_query=request.raw_query,
+                urgency=request.urgency.value,
+                intent=None,
+                language="en",
+                status="cancelled",
+                booking_id=None,
+                trace=initial_state.get("trace", []),
+                created_at=datetime.now().isoformat()
+            ))
+            yield f"data: {json.dumps({'event': 'cancelled', 'detail': 'Request cancelled by user'})}\n\n"
+            raise
         except asyncio.TimeoutError:
             yield f"data: {json.dumps({'event': 'error', 'detail': 'Stream timed out'})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'event': 'error', 'detail': str(e)})}\n\n"
         finally:
-            # Always send SSE termination sentinel so the client can close cleanly
+            active_tasks.pop(request_id, None)
+            intent_val = final_state.get("intent")
+            booking    = final_state.get("booking")
+            db_service.log_request(AdminRequestLog(
+                id=request_id,
+                user_id=request.user_id,
+                raw_query=request.raw_query,
+                urgency=request.urgency.value,
+                intent=intent_val.value if intent_val else None,
+                language=final_state.get("language", "en"),
+                status="success" if booking else "no_provider",
+                booking_id=booking.id if booking else None,
+                trace=final_state.get("trace", []),
+                created_at=datetime.now().isoformat()
+            ))
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -228,6 +437,50 @@ async def create_service_request_stream(request: ServiceRequest):
             "Connection": "keep-alive",
         },
     )
+
+
+@router.post("/{request_id}/select")
+async def select_provider(request_id: str, body: ProviderSelectionBody):
+    """Called by the mobile client to choose a provider from the shortlist."""
+    event = _pending_selections.get(request_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="No pending provider selection for this request")
+    _selection_results[request_id] = body.provider_id
+    event.set()
+    return api_response(success=True, message="Provider selected successfully")
+
+
+@router.post("/{request_id}/cancel")
+async def cancel_service_request(request_id: str):
+    """Cancel a running request by ID."""
+    task = active_tasks.get(request_id)
+    if task:
+        task.cancel()
+        existing_log = db_service.get_request_log_by_id(request_id)
+        if existing_log:
+            existing_log.status = "cancelled"
+            db_service.log_request(existing_log)
+        else:
+            db_service.log_request(AdminRequestLog(
+                id=request_id,
+                user_id="unknown",
+                raw_query="Cancelled request",
+                urgency="medium",
+                intent=None,
+                language="en",
+                status="cancelled",
+                booking_id=None,
+                trace=[],
+                created_at=datetime.now().isoformat()
+            ))
+        return api_response(success=True, message="Request cancellation request sent successfully.")
+    else:
+        existing_log = db_service.get_request_log_by_id(request_id)
+        if existing_log:
+            existing_log.status = "cancelled"
+            db_service.log_request(existing_log)
+            return api_response(success=True, message="Request marked as cancelled in database.")
+        return api_response(success=False, message="Request not found or already completed.")
 
 
 # FIX 4: Deprecated path — kept for backward compatibility, delegates to bookings router logic

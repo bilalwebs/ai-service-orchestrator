@@ -31,18 +31,30 @@ class ProviderRepository:
         return [self._orm_to_provider(r) for r in rows]
 
     def create_provider(self, provider: ProviderSchema) -> ProviderSchema:
+        lat = provider.location.lat
+        lng = provider.location.lng
+        if lat is None or lng is None or (lat == 0.0 and lng == 0.0):
+            from tools.maps_tool import maps_tool
+            coords = maps_tool.geocode(provider.location.address)
+            lat = coords.get("lat", 24.8607)
+            lng = coords.get("lng", 67.0011)
+            # Update the provider's location object as well
+            provider.location.lat = lat
+            provider.location.lng = lng
+
         row = models.Provider(
             id=provider.id,
             name=provider.name,
             service_type=provider.service_type,
             rating=provider.rating,
             address=provider.location.address,
-            lat=provider.location.lat,
-            lng=provider.location.lng,
+            lat=lat,
+            lng=lng,
             phone=provider.phone,
             price_per_hour=provider.price_per_hour,
             experience_years=provider.experience_years,
             availability=provider.availability,
+            range_km=provider.range_km,
         )
         try:
             self._db.add(row)
@@ -90,4 +102,5 @@ class ProviderRepository:
             price_per_hour=row.price_per_hour,
             experience_years=row.experience_years,
             availability=row.availability,
+            range_km=row.range_km,
         )
