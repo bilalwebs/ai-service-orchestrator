@@ -133,6 +133,7 @@ class MockDB:
             ),
         }
         self.bookings: List[Booking] = []
+        self.fcm_tokens: Dict[str, List[dict]] = {}  # user_id → [{token, device_id}]
 
     def get_providers_by_type(self, service_type: ServiceType) -> List[Provider]:
         return [p for p in self.providers.values() if p.service_type == service_type]
@@ -209,6 +210,37 @@ class MockDB:
                 b.status = BookingStatus.COMPLETED
                 return b
         return None
+
+    def update_booking_status(self, booking_id: str, new_status):
+        """Update booking to any valid status."""
+        for b in self.bookings:
+            if b.id == booking_id:
+                b.status = new_status
+                return b
+        return None
+
+    # ── FCM Token Management ─────────────────────────────────────────────
+    def register_fcm_token(self, user_id: str, fcm_token: str, device_id: str = None):
+        """Register an FCM token for a user. Replaces existing token for same device."""
+        if user_id not in self.fcm_tokens:
+            self.fcm_tokens[user_id] = []
+        # Remove existing entry for same token or device_id
+        self.fcm_tokens[user_id] = [
+            t for t in self.fcm_tokens[user_id]
+            if t["token"] != fcm_token and (device_id is None or t.get("device_id") != device_id)
+        ]
+        self.fcm_tokens[user_id].append({"token": fcm_token, "device_id": device_id})
+
+    def get_fcm_tokens(self, user_id: str) -> List[str]:
+        """Return all FCM tokens for a user."""
+        return [t["token"] for t in self.fcm_tokens.get(user_id, [])]
+
+    def remove_fcm_token(self, fcm_token: str):
+        """Remove a stale/invalid FCM token from all users."""
+        for user_id in self.fcm_tokens:
+            self.fcm_tokens[user_id] = [
+                t for t in self.fcm_tokens[user_id] if t["token"] != fcm_token
+            ]
 
 
 # Global instance

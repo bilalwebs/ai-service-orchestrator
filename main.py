@@ -9,13 +9,13 @@ from contextlib import asynccontextmanager
 import traceback
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from routers import requests, admin
 from routers.auth_router import router as auth_router
 from fastapi.responses import JSONResponse
-from routers import requests, admin, bookings, services
+from routers import requests, admin, bookings, services, notifications
 from schemas.response import api_response
 import uvicorn
 import logging, ngrok
+from tools.notification_service import init_firebase
  
  
 # HelloHandler and HTTPServer are removed as we will serve the FastAPI app instead.
@@ -28,6 +28,9 @@ USE_REAL_DB = os.getenv("USE_REAL_DB", "false").lower() == "true"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize Firebase Admin SDK for Push Notifications
+    init_firebase()
+    
     # Startup: create tables if using real DB
     if USE_REAL_DB:
         from db.database import engine, Base
@@ -48,6 +51,7 @@ app = FastAPI(
 )
 
 app.include_router(auth_router)
+app.include_router(notifications.router)
 
 # ── FIX 5: Global error handlers — consistent JSON error shape for all failures ──
 

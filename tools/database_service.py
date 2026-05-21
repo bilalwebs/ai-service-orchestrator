@@ -66,6 +66,9 @@ class MockDatabaseService:
     def complete_booking_admin(self, booking_id: str) -> Optional[Booking]:
         return self._db.complete_booking_admin(booking_id)
 
+    def update_booking_status(self, booking_id: str, new_status) -> Optional[Booking]:
+        return self._db.update_booking_status(booking_id, new_status)
+
     # Admin logs
     def log_request(self, entry: AdminRequestLog) -> None:
         self._db.log_request(entry)
@@ -75,6 +78,16 @@ class MockDatabaseService:
 
     def get_request_log_by_id(self, request_id: str) -> Optional[AdminRequestLog]:
         return self._db.get_request_log_by_id(request_id)
+
+    # FCM Tokens
+    def register_fcm_token(self, user_id: str, fcm_token: str, device_id: str = None) -> None:
+        self._db.register_fcm_token(user_id, fcm_token, device_id)
+
+    def get_fcm_tokens(self, user_id: str) -> List[str]:
+        return self._db.get_fcm_tokens(user_id)
+
+    def remove_fcm_token(self, fcm_token: str) -> None:
+        self._db.remove_fcm_token(fcm_token)
 
 
 # ── SQLAlchemy backend ────────────────────────────────────────────────────────
@@ -148,6 +161,16 @@ class SQLDatabaseService:
         with self._session_scope() as scope:
             return scope.bookings.complete_booking_admin(booking_id)
 
+    def update_booking_status(self, booking_id: str, new_status) -> Optional[Booking]:
+        with self._session_scope() as scope:
+            # Note: This is a placeholder. A full SQL implementation would update the booking.
+            # We'll use the MockDB for the hackathon context.
+            booking = scope.bookings.get_booking_by_id(booking_id)
+            if booking:
+                booking.status = new_status
+                return scope.bookings.save_booking(booking)
+            return None
+
     # Admin logs
     def log_request(self, entry: AdminRequestLog) -> None:
         with self._session_scope() as scope:
@@ -160,6 +183,42 @@ class SQLDatabaseService:
     def get_request_log_by_id(self, request_id: str) -> Optional[AdminRequestLog]:
         with self._session_scope() as scope:
             return scope.logs.get_request_log_by_id(request_id)
+
+    # FCM Tokens
+    def register_fcm_token(self, user_id: str, fcm_token: str, device_id: str = None) -> None:
+        with self._session_scope() as scope:
+            from db.models import FCMToken
+            # Remove existing token for same device
+            if device_id:
+                scope._session.query(FCMToken).filter(
+                    FCMToken.user_id == user_id,
+                    FCMToken.device_id == device_id
+                ).delete()
+            
+            # Remove existing entry if token already exists somewhere
+            scope._session.query(FCMToken).filter(FCMToken.fcm_token == fcm_token).delete()
+            
+            new_token = FCMToken(user_id=user_id, fcm_token=fcm_token, device_id=device_id)
+            scope._session.add(new_token)
+            try:
+                scope._session.commit()
+            except Exception:
+                scope._session.rollback()
+
+    def get_fcm_tokens(self, user_id: str) -> List[str]:
+        with self._session_scope() as scope:
+            from db.models import FCMToken
+            tokens = scope._session.query(FCMToken).filter(FCMToken.user_id == user_id).all()
+            return [t.fcm_token for t in tokens]
+
+    def remove_fcm_token(self, fcm_token: str) -> None:
+        with self._session_scope() as scope:
+            from db.models import FCMToken
+            scope._session.query(FCMToken).filter(FCMToken.fcm_token == fcm_token).delete()
+            try:
+                scope._session.commit()
+            except Exception:
+                scope._session.rollback()
 
     # Context manager — opens and closes a DB session cleanly
     class _session_scope:
@@ -188,3 +247,4 @@ if USE_REAL_DB:
 else:
     db_service = MockDatabaseService()
     print("[database_service] Using MockDB backend (development).")
+
