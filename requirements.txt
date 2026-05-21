@@ -24,3 +24,5 @@ passlib[bcrypt]
 python-multipart
 requests
 >>>>>>> 469a847 (security: enforce secure gemini env configuration and save latest updates)
+
+ngrok

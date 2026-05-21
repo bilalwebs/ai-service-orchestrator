@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
-
+import ngrok
+from http.server import HTTPServer, BaseHTTPRequestHandler
 # Load environment variables before importing other modules
 load_dotenv()
 
@@ -14,6 +15,13 @@ from fastapi.responses import JSONResponse
 from routers import requests, admin, bookings, services
 from schemas.response import api_response
 import uvicorn
+import logging, ngrok
+ 
+ 
+# HelloHandler and HTTPServer are removed as we will serve the FastAPI app instead.
+
+logging.basicConfig(level=logging.INFO)
+ 
 
 USE_REAL_DB = os.getenv("USE_REAL_DB", "false").lower() == "true"
 
@@ -102,17 +110,36 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 # ── CORS Middleware ───────────────────────────────────────────────────────────
-# Development: allow all origins (*).
-# For production, set ALLOWED_ORIGINS=https://myapp.vercel.app,http://localhost:3000
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# allow_origins=["*"] is incompatible with allow_credentials=True per the CORS spec.
+# Default to known dev origins; override via ALLOWED_ORIGINS env var for production.
+_raw_origins = os.getenv("ALLOWED_ORIGINS")
+if _raw_origins:
+    ALLOWED_ORIGINS = _raw_origins.split(",")
+    if "*" in ALLOWED_ORIGINS:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origin_regex=r"https?://.*",
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    else:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=ALLOWED_ORIGINS,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+else:
+    # Default developer/hackathon mode: dynamically allow any http/https origin with credentials
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"https?://.*",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(requests.router)
@@ -137,5 +164,26 @@ async def health_check():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    # Note: Use reload=True only in development
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    
+    # Set up ngrok tunnel if NGROK_AUTHTOKEN is provided in the environment
+    authtoken = os.getenv("NGROK_AUTHTOKEN")
+    if authtoken:
+        logging.info("Setting up ngrok tunnel...")
+        try:
+            ngrok.set_auth_token(authtoken)
+            listener = ngrok.forward(port)
+            logging.info(f"\n[ngrok] Secure tunnel established at: {listener.url()}\n")
+        except Exception as e:
+            logging.error(f"Failed to start ngrok tunnel: {e}")
+    
+    try:
+        logging.info(f"Starting FastAPI server on port {port}. Press Ctrl+C to stop.")
+        uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    except KeyboardInterrupt:
+        logging.info("Shutting down server...")
+        if authtoken:
+            try:
+                ngrok.disconnect()
+            except Exception:
+                pass
+        logging.info("Server stopped cleanly.")
