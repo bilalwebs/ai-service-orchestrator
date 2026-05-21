@@ -68,3 +68,12 @@ class AdminRequestLog(Base):
     booking_id = Column(String, nullable=True)
     trace = Column(JSON)
     created_at = Column(String)
+
+class FCMToken(Base):
+    __tablename__ = "fcm_tokens"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.id"), index=True)
+    fcm_token = Column(String, unique=True, nullable=False)
+    device_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

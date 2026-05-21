@@ -82,11 +82,47 @@ async def get_booking(booking_id: str):
     return api_response(success=True, message="Admin booking retrieved", data=_booking_to_dict(booking))
 
 
+async def _handle_status_change_notification(booking, new_status: str):
+    """Helper to generate AI follow-ups and send FCM push notification."""
+    try:
+        from tools.notification_service import notify_user
+        from agents.followup_ai import generate_followup_actions
+        
+        provider = db_service.get_provider_by_id(booking.provider_id)
+        
+        # Determine language (try to get from request log, default to en)
+        # Note: In a real system, you'd store language on the user or booking.
+        language = "en"
+        logs = db_service.get_all_request_logs()
+        for log in logs:
+            if log.booking_id == booking.id:
+                language = log.language
+                break
+                
+        # Generate AI follow-up actions
+        ai_data = await generate_followup_actions(booking, new_status, provider, language)
+        
+        # Send push notification
+        title = f"Booking {new_status.title()}"
+        body = f"Your {booking.service_type.value.replace('_', ' ')} booking is now {new_status}."
+        if new_status == "completed":
+            body = f"Service completed! Tap to see next steps."
+        elif new_status == "cancelled":
+            body = f"Your booking has been cancelled."
+            
+        notify_user(booking.user_id, title, body, data=ai_data)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Failed to send status change notification: {e}")
+
+
 @router.post("/bookings/{booking_id}/complete")
 async def complete_booking(booking_id: str):
     booking = db_service.complete_booking_admin(booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail=f"Booking {booking_id} not found")
+        
+    await _handle_status_change_notification(booking, "completed")
     return api_response(success=True, message="Booking completed", data=_booking_to_dict(booking))
 
 
@@ -95,8 +131,30 @@ async def cancel_booking(booking_id: str):
     booking = db_service.cancel_booking(booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail=f"Booking {booking_id} not found")
+        
+    await _handle_status_change_notification(booking, "cancelled")
     return api_response(success=True, message="Booking cancelled", data=_booking_to_dict(booking))
 
+
+@router.patch("/bookings/{booking_id}/status")
+async def update_booking_status(booking_id: str, payload: dict):
+    from schemas.models import BookingStatus
+    
+    new_status_str = payload.get("status")
+    if not new_status_str:
+        raise HTTPException(status_code=422, detail="Status field is required")
+        
+    try:
+        new_status = BookingStatus(new_status_str)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid status: {new_status_str}")
+        
+    booking = db_service.update_booking_status(booking_id, new_status)
+    if not booking:
+        raise HTTPException(status_code=404, detail=f"Booking {booking_id} not found")
+        
+    await _handle_status_change_notification(booking, new_status.value)
+    return api_response(success=True, message=f"Booking status updated to {new_status.value}", data=_booking_to_dict(booking))
 
 # ── Providers ─────────────────────────────────────────────────────────────────
 

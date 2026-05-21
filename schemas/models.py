@@ -25,6 +25,8 @@ class UrgencyLevel(str, Enum):
 class BookingStatus(str, Enum):
     PENDING = "pending"
     CONFIRMED = "confirmed"
+    PROVIDER_ON_THE_WAY = "provider_on_the_way"
+    ARRIVED = "arrived"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
@@ -117,3 +119,22 @@ class AdminRequestLog(BaseModel):
 # Optional: Config for better JSON handling
 class Config:
     use_enum_values = True
+
+
+class FCMTokenRegister(BaseModel):
+    """Request body to register an FCM device token for push notifications."""
+    user_id: str = Field(..., description="Unique user identifier")
+    fcm_token: str = Field(..., description="Firebase Cloud Messaging device token")
+    device_id: Optional[str] = Field(default=None, description="Optional unique device identifier for multi-device support")
+
+
+class NotificationPayload(BaseModel):
+    """Structured notification payload."""
+    title: str = Field(..., description="Notification title")
+    body: str = Field(..., description="Notification body text")
+    data: Optional[Dict[str, Any]] = Field(default=None, description="Additional data payload for rich notifications")
+
+
+class BookingStatusUpdate(BaseModel):
+    """Request body for updating booking status from admin panel."""
+    status: BookingStatus = Field(..., description="New booking status")
